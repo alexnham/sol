@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.gitignore
+.DS_Store
+*.log
+.env
+.env.*
+src/.env
+coverage
+.vite
+generated-keys

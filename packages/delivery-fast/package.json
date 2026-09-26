@@ -1,0 +1,10 @@
+{
+  "name": "@solana-workbench/delivery-fast",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@solana-workbench/delivery-sdk": "*"
+  }
+}

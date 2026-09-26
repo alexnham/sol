@@ -1,0 +1,12 @@
+services:
+  workbench:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      HELIUS_API_KEY: ${HELIUS_API_KEY:?Set HELIUS_API_KEY before starting the container}
+      HOST: 0.0.0.0
+      PORT: 8787
+    ports:
+      - "127.0.0.1:8787:8787"
+    restart: unless-stopped
