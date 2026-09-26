@@ -6,6 +6,12 @@ import type {
   SubmissionResult,
 } from "../shared/contracts";
 
+export interface VaultKeyMetadata {
+  address: string;
+  file: string;
+  createdAt: string;
+}
+
 async function request<T>(path: string, init: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -39,5 +45,29 @@ export function submitTransfer(
   return request("/api/submit", {
     method: "POST",
     body: JSON.stringify({ preparationId, transaction }),
+  });
+}
+
+export async function fetchVaultKeys(): Promise<VaultKeyMetadata[]> {
+  const result = await request<{ keypairs: VaultKeyMetadata[] }>("/api/keypairs", { method: "GET" });
+  return result.keypairs;
+}
+
+export async function generateVaultKeys(count: number): Promise<VaultKeyMetadata[]> {
+  const result = await request<{ keypairs: VaultKeyMetadata[] }>("/api/keypairs/generate", {
+    method: "POST",
+    body: JSON.stringify({ count }),
+  });
+  return result.keypairs;
+}
+
+export function requestVaultSignature(
+  preparationId: string,
+  signerAddress: string,
+  transaction: string,
+): Promise<{ signature: string }> {
+  return request("/api/keypairs/sign", {
+    method: "POST",
+    body: JSON.stringify({ preparationId, address: signerAddress, transaction }),
   });
 }

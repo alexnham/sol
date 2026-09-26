@@ -36,6 +36,18 @@ The command writes one timestamped `.txt` file under `generated-keys/`. The file
 
 The secret keys are stored as plaintext because this utility is intended for local development. Never commit, share, or fund these files with assets you cannot afford to lose; use a hardware wallet or managed signer for production funds.
 
+To import a wallet-exported, base58-encoded 64-byte private key, use the hidden CLI prompt:
+
+```bash
+npm run import-key
+```
+
+The command derives the public address for confirmation and writes a new owner-readable vault file. Do not pass the private key as a command-line argument. For non-interactive input, pipe the key and add `--yes` only after independently verifying the derived address.
+
+The UI also includes a **Keygen** tab. It lists public metadata from compatible files in `generated-keys/`, generates up to 1,000 wallets per request, and can place selected wallets into the workbench as sources or destinations. Selecting multiple sources creates a consolidation plan; selecting destinations creates a share plan with editable `0.01 SOL` defaults.
+
+Private-key bytes never enter the browser. Managed signing happens through the localhost API, which signs only a transaction whose message exactly matches an active server-side preparation and only for an address that preparation requires. External `SignerProvider` adapters can still supply any signers not present in the local vault.
+
 ## Run with Docker
 
 The production container builds the Vite client and serves both the UI and API from port `8787`. Secrets are supplied only at runtime and are excluded from the image build context.

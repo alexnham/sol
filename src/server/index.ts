@@ -12,6 +12,7 @@ import type { PrepareRequest, SubmitRequest } from "../shared/contracts";
 import { deliveryAdapters, transferPlugins } from "../shared/plugin-registry";
 import { prepareTransaction, type StoredPreparation } from "./prepare";
 import { rpcCall } from "./rpc";
+import { generateVaultKeys, listVaultKeys, signWithVaultKey } from "./key-vault";
 
 const directory = fileURLToPath(new URL(".", import.meta.url));
 dotenv.config({ path: resolve(directory, "../.env") });
@@ -39,6 +40,52 @@ app.get("/api/plugins", (_request, response) => {
       supportsMainnet: supports("mainnet"),
     })),
   });
+});
+
+app.get("/api/keypairs", async (_request, response, next) => {
+  try {
+    response.json({ keypairs: await listVaultKeys() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/keypairs/generate", async (request, response, next) => {
+  try {
+    const count = Number((request.body as { count?: unknown }).count);
+    response.status(201).json({ keypairs: await generateVaultKeys(count) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/keypairs/sign", async (request, response, next) => {
+  try {
+    const body = request.body as {
+      preparationId?: unknown;
+      address?: unknown;
+      transaction?: unknown;
+    };
+    if (
+      typeof body.preparationId !== "string" ||
+      typeof body.address !== "string" ||
+      typeof body.transaction !== "string"
+    ) {
+      throw new Error("Preparation, signer address, and transaction are required");
+    }
+    const stored = preparations.get(body.preparationId);
+    if (!stored) throw new Error("Preparation not found or expired");
+    if (!stored.preparation.requiredSigners.includes(body.address)) {
+      throw new Error("This wallet is not a required signer for the prepared transaction");
+    }
+    const transaction = getTransactionDecoder().decode(Buffer.from(body.transaction, "base64"));
+    if (Buffer.from(transaction.messageBytes).toString("base64") !== stored.messageBase64) {
+      throw new Error("The signing request does not match the prepared immutable message");
+    }
+    response.json({ signature: await signWithVaultKey(body.address, body.transaction) });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post("/api/prepare", async (request: Request, response: Response, next: NextFunction) => {

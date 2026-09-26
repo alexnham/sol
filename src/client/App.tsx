@@ -15,8 +15,16 @@ import {
   signPreparedTransaction,
   transactionSize,
 } from "../shared/transaction";
-import { fetchPlugins, prepareTransfer, submitTransfer } from "./api";
+import {
+  fetchPlugins,
+  fetchVaultKeys,
+  generateVaultKeys,
+  prepareTransfer,
+  submitTransfer,
+  type VaultKeyMetadata,
+} from "./api";
 import { getSignerProvider } from "./signer-provider";
+import { createVaultSignerProvider } from "./vault-signer";
 
 const SAMPLE = `{
   "type": "share",
@@ -61,8 +69,13 @@ const PRESETS: Array<{
 
 type Stage = "idle" | "preparing" | "ready" | "signing" | "submitting" | "confirmed" | "failed";
 type SignerUiStatus = "waiting" | "signing" | "signed" | "failed";
+type AppTab = "workbench" | "keygen";
+
+const FALLBACK_SOURCE = "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE";
+const FALLBACK_DESTINATION = "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ";
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState<AppTab>("workbench");
   const [json, setJson] = useState(SAMPLE);
   const [network, setNetwork] = useState<Network>("devnet");
   const [preset, setPreset] = useState<DeliveryPreset>("economy");
@@ -76,6 +89,9 @@ export default function App() {
   const [plugins, setPlugins] = useState<PluginCatalog["transfer"]>([
     { id: "native-sol-transfer", label: "Native SOL transfer" },
   ]);
+  const [vaultKeys, setVaultKeys] = useState<VaultKeyMetadata[]>([]);
+  const [vaultBusy, setVaultBusy] = useState(false);
+  const [vaultError, setVaultError] = useState<string | null>(null);
 
   const parsed = useMemo(() => parseEditor(json), [json]);
   const plan = parsed.plan;
@@ -97,6 +113,70 @@ export default function App() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    refreshVault().catch(() => undefined);
+  }, []);
+
+  async function refreshVault() {
+    try {
+      setVaultKeys(await fetchVaultKeys());
+      setVaultError(null);
+    } catch (reason) {
+      setVaultError(reason instanceof Error ? reason.message : "Could not load managed wallets");
+    }
+  }
+
+  async function generateKeys(count: number) {
+    setVaultBusy(true);
+    setVaultError(null);
+    try {
+      await generateVaultKeys(count);
+      await refreshVault();
+    } catch (reason) {
+      setVaultError(reason instanceof Error ? reason.message : "Key generation failed");
+    } finally {
+      setVaultBusy(false);
+    }
+  }
+
+  function useVaultKeys(addresses: string[], role: "sources" | "destinations") {
+    const selected = [...new Set(addresses)];
+    if (selected.length === 0) return;
+    let nextPlan: TransferPlan;
+    if (role === "sources" && selected.length > 1) {
+      const currentDestination = plan?.receivers.find(
+        (receiver) => !selected.includes(receiver.address),
+      )?.address ?? FALLBACK_DESTINATION;
+      nextPlan = {
+        type: "consolidation",
+        senders: selected.map((walletAddress) => ({ address: walletAddress, amountSol: "0.01" })),
+        receivers: [{ address: currentDestination }],
+      };
+    } else if (role === "sources") {
+      const receivers = plan?.type === "share"
+        ? plan.receivers.filter((receiver) => receiver.address !== selected[0])
+        : [];
+      nextPlan = {
+        type: "share",
+        senders: [{ address: selected[0]! }],
+        receivers: receivers.length > 0
+          ? receivers
+          : [{ address: FALLBACK_DESTINATION, amountSol: "0.01" }],
+      };
+    } else {
+      const currentSource = plan?.senders.find(
+        (sender) => !selected.includes(sender.address),
+      )?.address ?? FALLBACK_SOURCE;
+      nextPlan = {
+        type: "share",
+        senders: [{ address: currentSource }],
+        receivers: selected.map((walletAddress) => ({ address: walletAddress, amountSol: "0.01" })),
+      };
+    }
+    invalidate(JSON.stringify(nextPlan, null, 2));
+    setActiveTab("workbench");
+  }
 
   function invalidate(nextJson?: string) {
     if (nextJson !== undefined) setJson(nextJson);
@@ -142,9 +222,28 @@ export default function App() {
   async function signAndSend() {
     if (!preparation) return;
     setShowReview(false);
-    const provider = getSignerProvider();
+    const managedAddresses = new Set(vaultKeys.map((keypair) => keypair.address));
+    const canUseVault = preparation.requiredSigners.every((signer) => managedAddresses.has(signer));
+    const externalProvider = getSignerProvider();
+    const vaultProvider = createVaultSignerProvider(preparation.preparationId);
+    const provider = externalProvider
+      ? {
+          id: "managed-and-external-signers",
+          getSigner: (signerAddress: Parameters<typeof externalProvider.getSigner>[0]) =>
+            managedAddresses.has(String(signerAddress))
+              ? vaultProvider.getSigner(signerAddress)
+              : externalProvider.getSigner(signerAddress),
+        }
+      : canUseVault
+        ? vaultProvider
+        : null;
     if (!provider) {
-      setError("No signer provider is attached. Use window.solanaWorkbench.setSignerProvider(provider).");
+      const missing = preparation.requiredSigners.filter((signer) => !managedAddresses.has(signer));
+      setError(
+        missing.length > 0
+          ? `Missing signer access for ${missing.map(shortAddress).join(", ")}. Add those keys in Keygen or attach a signer provider.`
+          : "No signer provider is attached. Use window.solanaWorkbench.setSignerProvider(provider).",
+      );
       setStage("failed");
       return;
     }
@@ -189,7 +288,12 @@ export default function App() {
             <p>One message. Every wallet. One on-chain transaction.</p>
           </div>
         </div>
-        <div className="network-switch" aria-label="Solana network">
+        <div className="topbar-controls">
+          <nav className="app-tabs" aria-label="Workbench sections">
+            <button type="button" className={activeTab === "workbench" ? "active" : ""} onClick={() => setActiveTab("workbench")}>Workbench</button>
+            <button type="button" className={activeTab === "keygen" ? "active" : ""} onClick={() => setActiveTab("keygen")}>Keygen <span>{vaultKeys.length}</span></button>
+          </nav>
+          <div className="network-switch" aria-label="Solana network">
           {(["devnet", "mainnet"] as Network[]).map((value) => (
             <button
               key={value}
@@ -200,9 +304,11 @@ export default function App() {
               <span className="network-dot" />{value}
             </button>
           ))}
+          </div>
         </div>
       </header>
 
+      {activeTab === "workbench" ? (
       <section className="workspace">
         <section className="editor-pane" aria-labelledby="json-heading">
           <div className="pane-heading">
@@ -342,6 +448,16 @@ export default function App() {
           </div>
         </section>
       </section>
+      ) : (
+        <KeygenPanel
+          keypairs={vaultKeys}
+          busy={vaultBusy}
+          error={vaultError}
+          onGenerate={generateKeys}
+          onRefresh={refreshVault}
+          onUse={useVaultKeys}
+        />
+      )}
 
       {showReview && preparation && (
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setShowReview(false)}>
@@ -358,6 +474,99 @@ export default function App() {
         </div>
       )}
     </main>
+  );
+}
+
+function KeygenPanel({
+  keypairs,
+  busy,
+  error,
+  onGenerate,
+  onRefresh,
+  onUse,
+}: {
+  keypairs: VaultKeyMetadata[];
+  busy: boolean;
+  error: string | null;
+  onGenerate(count: number): Promise<void>;
+  onRefresh(): Promise<void>;
+  onUse(addresses: string[], role: "sources" | "destinations"): void;
+}) {
+  const [count, setCount] = useState(1);
+  const [selected, setSelected] = useState<string[]>([]);
+  const selectedSet = new Set(selected);
+
+  function toggle(walletAddress: string) {
+    setSelected((current) => current.includes(walletAddress)
+      ? current.filter((value) => value !== walletAddress)
+      : [...current, walletAddress]);
+  }
+
+  return (
+    <section className="keygen-workspace" aria-labelledby="keygen-title">
+      <header className="keygen-hero">
+        <div>
+          <span className="vault-kicker">Local key cabinet</span>
+          <h2 id="keygen-title">Managed wallets</h2>
+          <p>Keys stay in permission-restricted files on this machine. The browser receives public addresses only.</p>
+        </div>
+        <form className="generate-control" onSubmit={(event) => {
+          event.preventDefault();
+          void onGenerate(count);
+        }}>
+          <label htmlFor="key-count">New keypairs</label>
+          <div>
+            <input id="key-count" type="number" min="1" max="1000" value={count} onChange={(event) => setCount(Number(event.target.value))} />
+            <button className="primary" type="submit" disabled={busy}>{busy ? "Generating…" : "Generate"}</button>
+          </div>
+        </form>
+      </header>
+
+      <div className="vault-warning" role="note">
+        <strong>Local plaintext custody</strong>
+        <span>These files can control funds. Keep them out of Git, backups you do not trust, and shared folders.</span>
+      </div>
+
+      <div className="vault-toolbar">
+        <label className="select-all">
+          <input
+            type="checkbox"
+            checked={keypairs.length > 0 && selected.length === keypairs.length}
+            onChange={() => setSelected(selected.length === keypairs.length ? [] : keypairs.map((keypair) => keypair.address))}
+          />
+          {selected.length > 0 ? `${selected.length} selected` : `${keypairs.length} managed`}
+        </label>
+        <div>
+          <button className="secondary" type="button" onClick={() => void onRefresh()}>Refresh files</button>
+          <button className="secondary" type="button" disabled={selected.length === 0} onClick={() => onUse(selected, "destinations")}>Use as destinations</button>
+          <button className="primary" type="button" disabled={selected.length === 0} onClick={() => onUse(selected, "sources")}>Use as sources</button>
+        </div>
+      </div>
+
+      {error && <div className="alert error-alert" role="alert"><strong>Key vault unavailable</strong><span>{error}</span></div>}
+
+      {keypairs.length === 0 ? (
+        <div className="vault-empty">
+          <span className="vault-empty-mark">＋</span>
+          <h3>No managed wallets yet</h3>
+          <p>Generate a keypair here or place a compatible key file in <code>generated-keys/</code>, then refresh.</p>
+        </div>
+      ) : (
+        <ol className="key-ledger">
+          {keypairs.map((keypair, index) => (
+            <li key={keypair.address} className={selectedSet.has(keypair.address) ? "selected" : ""}>
+              <label>
+                <input type="checkbox" checked={selectedSet.has(keypair.address)} onChange={() => toggle(keypair.address)} />
+                <span className={`wallet-ident ident-${index % 4}`} />
+                <span className="ledger-address"><strong>{shortAddress(keypair.address)}</strong><code>{keypair.address}</code></span>
+                <span className="ledger-file"><strong>{keypair.file}</strong><small>{formatVaultDate(keypair.createdAt)}</small></span>
+                <span className="custody-badge">Ready to sign</span>
+              </label>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
   );
 }
 
@@ -505,4 +714,9 @@ function signerStatusLabel(status: SignerUiStatus): string {
     failed: "Failed",
   };
   return labels[status];
+}
+
+function formatVaultDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Imported file" : date.toLocaleString();
 }
