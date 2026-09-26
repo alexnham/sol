@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import App from "../client/App";
 
 describe("workbench UI", () => {
@@ -11,11 +11,90 @@ describe("workbench UI", () => {
     expect(screen.getByRole("button", { name: "Prepare live quote" })).toBeEnabled();
   });
 
+  it("collapses large wallet groups in the Workbench preview", () => {
+    const receivers = [
+      "BApRNbirCZhPJ2uHAcesJNJCEwCz98p9o6W4f6bc4yr1",
+      "8rb5FTPT3A8HBaYtDAbzduBZsYi18sRy7cyJmuD5AUT4",
+      "4yPAtNZ4GRPaFf183evdnKBgL8GRd4vno32P3P8LHUh1",
+      "ABWfHvVKf9t41bwJC3zQAjvsJUweFQb9pQXR8gCroXDR",
+      "9Bxc8u6f5pBo4gWTC5kTaM9LAALdfSHP14Rnw9NW1E4w",
+      "7SWDVnCKxA5LChCZZN9egCMdx63Fqnryw5XpeM4TXFSg",
+      "AXJdkT885fYVFkPA7mVmgbh2GU6CNfAcKWZrarFngnFf",
+      "5KCDtrz4GJbQ2rh5XRGPuD7DgAxKiSXu1G75EQERokuK",
+      "Ksxj2wdNSJadLLqHhJtXt9ygSrLwuvGL6Li9fGGKV1C",
+    ];
+    const plan = {
+      type: "share",
+      senders: [{ address: "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ" }],
+      receivers: receivers.map((address) => ({ address, amountSol: "0.00001" })),
+    };
+
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Transfer plan JSON"), {
+      target: { value: JSON.stringify(plan) },
+    });
+
+    const showDestinations = screen.getByRole("button", { name: "Show 9 destinations" });
+    expect(showDestinations).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("9 wallets")).toBeInTheDocument();
+    expect(document.querySelectorAll(".wallet")).toHaveLength(1);
+
+    fireEvent.click(showDestinations);
+    expect(screen.getByRole("button", { name: "Hide 9 destinations" })).toHaveAttribute("aria-expanded", "true");
+    expect(document.querySelectorAll(".wallet")).toHaveLength(10);
+  });
+
+  it("collapses a large Workbench JSON editor without losing its contents", () => {
+    render(<App />);
+    const editor = screen.getByLabelText("Transfer plan JSON") as HTMLTextAreaElement;
+    const largeJson = `${editor.value}${"\n".repeat(45)}`;
+
+    fireEvent.change(editor, { target: { value: largeJson } });
+
+    const showJson = screen.getByRole("button", { name: /Show JSON \(/ });
+    expect(showJson).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByLabelText("Transfer plan JSON")).not.toBeInTheDocument();
+    expect(screen.getByText("Transfer JSON hidden")).toBeInTheDocument();
+
+    fireEvent.click(showJson);
+    expect(screen.getByRole("button", { name: "Hide JSON" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByLabelText("Transfer plan JSON")).toHaveValue(largeJson);
+  });
+
   it("opens the Keygen wallet manager without exposing secret inputs", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /Keygen/ }));
     expect(screen.getByRole("heading", { name: "Managed wallets" })).toBeInTheDocument();
     expect(screen.getByLabelText("New keypairs")).toHaveValue(1);
     expect(screen.queryByLabelText(/private|secret/i)).not.toBeInTheDocument();
+  });
+
+  it("collapses large managed-wallet lists by default and lets the operator expand them", async () => {
+    const keypairs = Array.from({ length: 30 }, (_, index) => ({
+      address: `wallet-${index}`,
+      file: "many-wallets.txt",
+      createdAt: "2026-09-26T00:00:00.000Z",
+    }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      return {
+        ok: true,
+        json: async () => path.endsWith("/api/keypairs")
+          ? { keypairs }
+          : { transfer: [{ id: "native-sol-transfer", label: "Native SOL transfer" }], delivery: [] },
+      } as Response;
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Keygen/ }));
+
+    const showWallets = await screen.findByRole("button", { name: "Show wallets (30)" });
+    expect(showWallets).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("30 managed wallets hidden")).toBeInTheDocument();
+    expect(screen.queryByText("wallet-29")).not.toBeInTheDocument();
+
+    fireEvent.click(showWallets);
+    expect(screen.getByRole("button", { name: "Hide wallets" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("wallet-29")).toBeInTheDocument();
   });
 });

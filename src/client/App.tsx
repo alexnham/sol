@@ -92,9 +92,13 @@ export default function App() {
   const [vaultKeys, setVaultKeys] = useState<VaultKeyMetadata[]>([]);
   const [vaultBusy, setVaultBusy] = useState(false);
   const [vaultError, setVaultError] = useState<string | null>(null);
+  const [editorExpandedOverride, setEditorExpandedOverride] = useState<boolean | null>(null);
 
   const parsed = useMemo(() => parseEditor(json), [json]);
   const plan = parsed.plan;
+  const jsonLineCount = json.split("\n").length;
+  const jsonIsLarge = jsonLineCount > 40 || json.length > 4_000;
+  const editorExpanded = editorExpandedOverride ?? !jsonIsLarge;
 
   useEffect(() => {
     let active = true;
@@ -316,21 +320,50 @@ export default function App() {
               <h2 id="json-heading">Transfer JSON</h2>
               <p>Addresses and explicit SOL amounts only. Never paste private keys.</p>
             </div>
-            <span className={`status-chip ${parsed.error ? "invalid" : "valid"}`}>
-              {parsed.error ? "Needs attention" : "Valid structure"}
-            </span>
-          </div>
-          <div className="code-frame">
-            <div className="code-gutter" aria-hidden="true">
-              {json.split("\n").map((_, index) => <span key={index}>{index + 1}</span>)}
+            <div className="editor-heading-actions">
+              {jsonIsLarge && (
+                <button
+                  className="editor-collapse-button"
+                  type="button"
+                  aria-controls="json-editor-region"
+                  aria-expanded={editorExpanded}
+                  onClick={() => setEditorExpandedOverride(!editorExpanded)}
+                >
+                  {editorExpanded ? "Hide JSON" : `Show JSON (${jsonLineCount.toLocaleString()} lines)`}
+                </button>
+              )}
+              <span className={`status-chip ${parsed.error ? "invalid" : "valid"}`}>
+                {parsed.error ? "Needs attention" : "Valid structure"}
+              </span>
             </div>
-            <textarea
-              aria-label="Transfer plan JSON"
-              spellCheck={false}
-              value={json}
-              onChange={(event) => invalidate(event.target.value)}
-            />
           </div>
+          {editorExpanded ? (
+            <div className="code-frame" id="json-editor-region">
+              <div className="code-gutter" aria-hidden="true">
+                {json.split("\n").map((_, index) => <span key={index}>{index + 1}</span>)}
+              </div>
+              <textarea
+                aria-label="Transfer plan JSON"
+                spellCheck={false}
+                value={json}
+                onChange={(event) => invalidate(event.target.value)}
+              />
+            </div>
+          ) : (
+            <button
+              className="code-frame-summary"
+              id="json-editor-region"
+              type="button"
+              onClick={() => setEditorExpandedOverride(true)}
+            >
+              <span className="code-summary-braces" aria-hidden="true">{"{…}"}</span>
+              <span>
+                <strong>Transfer JSON hidden</strong>
+                <small>{jsonSummary(jsonLineCount, plan)}</small>
+              </span>
+              <span className="code-summary-action">Show JSON</span>
+            </button>
+          )}
           <div className="editor-message" role="status">
             {parsed.error ? (
               <><span className="message-icon">!</span><span>{parsed.error}</span></>
@@ -494,7 +527,9 @@ function KeygenPanel({
 }) {
   const [count, setCount] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
+  const [ledgerExpandedOverride, setLedgerExpandedOverride] = useState<boolean | null>(null);
   const selectedSet = new Set(selected);
+  const ledgerExpanded = ledgerExpandedOverride ?? keypairs.length <= 25;
 
   function toggle(walletAddress: string) {
     setSelected((current) => current.includes(walletAddress)
@@ -537,6 +572,18 @@ function KeygenPanel({
           {selected.length > 0 ? `${selected.length} selected` : `${keypairs.length} managed`}
         </label>
         <div>
+          {keypairs.length > 0 && (
+            <button
+              className="secondary vault-collapse"
+              type="button"
+              aria-controls="managed-wallet-list"
+              aria-expanded={ledgerExpanded}
+              onClick={() => setLedgerExpandedOverride(!ledgerExpanded)}
+            >
+              <span aria-hidden="true">{ledgerExpanded ? "▴" : "▾"}</span>
+              {ledgerExpanded ? "Hide wallets" : `Show wallets (${keypairs.length.toLocaleString()})`}
+            </button>
+          )}
           <button className="secondary" type="button" onClick={() => void onRefresh()}>Refresh files</button>
           <button className="secondary" type="button" disabled={selected.length === 0} onClick={() => onUse(selected, "destinations")}>Use as destinations</button>
           <button className="primary" type="button" disabled={selected.length === 0} onClick={() => onUse(selected, "sources")}>Use as sources</button>
@@ -551,8 +598,8 @@ function KeygenPanel({
           <h3>No managed wallets yet</h3>
           <p>Generate a keypair here or place a compatible key file in <code>generated-keys/</code>, then refresh.</p>
         </div>
-      ) : (
-        <ol className="key-ledger">
+      ) : ledgerExpanded ? (
+        <ol className="key-ledger" id="managed-wallet-list">
           {keypairs.map((keypair, index) => (
             <li key={keypair.address} className={selectedSet.has(keypair.address) ? "selected" : ""}>
               <label>
@@ -565,6 +612,16 @@ function KeygenPanel({
             </li>
           ))}
         </ol>
+      ) : (
+        <button
+          className="vault-collapsed"
+          id="managed-wallet-list"
+          type="button"
+          onClick={() => setLedgerExpandedOverride(true)}
+        >
+          <strong>{keypairs.length.toLocaleString()} managed wallets hidden</strong>
+          <span>{selected.length > 0 ? `${selected.length.toLocaleString()} selected · ` : ""}Click to show the list</span>
+        </button>
       )}
     </section>
   );
@@ -576,19 +633,63 @@ function WalletRail({ plan }: { plan: TransferPlan | null }) {
   const destinations = plan.receivers;
   return (
     <div className={`wallet-flow ${plan.type}`}>
-      <div className="wallet-group">
-        <span className="group-label">{sources.length === 1 ? "Source" : `${sources.length} sources`}</span>
-        {sources.map((wallet, index) => (
-          <Wallet key={wallet.address} address={wallet.address} amount={"amountSol" in wallet ? wallet.amountSol : undefined} index={index} />
-        ))}
-      </div>
+      <WalletGroup id="source-wallets" label="source" wallets={sources} />
       <div className="rail" aria-hidden="true"><span /><b>→</b></div>
-      <div className="wallet-group destinations">
-        <span className="group-label">{destinations.length === 1 ? "Destination" : `${destinations.length} destinations`}</span>
-        {destinations.map((wallet, index) => (
-          <Wallet key={wallet.address} address={wallet.address} amount={"amountSol" in wallet ? wallet.amountSol : undefined} index={index} />
-        ))}
+      <WalletGroup id="destination-wallets" label="destination" wallets={destinations} />
+    </div>
+  );
+}
+
+function WalletGroup({
+  id,
+  label,
+  wallets,
+}: {
+  id: string;
+  label: "source" | "destination";
+  wallets: readonly { address: string; amountSol?: string }[];
+}) {
+  const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null);
+  const canCollapse = wallets.length > 8;
+  const expanded = expandedOverride ?? !canCollapse;
+  const pluralLabel = `${label}s`;
+
+  return (
+    <div className={`wallet-group ${pluralLabel}`}>
+      <div className="wallet-group-heading">
+        <span className="group-label">
+          {wallets.length === 1 ? capitalize(label) : `${wallets.length.toLocaleString()} ${pluralLabel}`}
+        </span>
+        {canCollapse && (
+          <button
+            className="wallet-group-toggle"
+            type="button"
+            aria-controls={id}
+            aria-expanded={expanded}
+            aria-label={`${expanded ? "Hide" : "Show"} ${wallets.length.toLocaleString()} ${pluralLabel}`}
+            onClick={() => setExpandedOverride(!expanded)}
+          >
+            {expanded ? "Hide" : "Show"} <span aria-hidden="true">{expanded ? "▴" : "▾"}</span>
+          </button>
+        )}
       </div>
+      {expanded ? (
+        <div className="wallet-stack" id={id}>
+          {wallets.map((wallet, index) => (
+            <Wallet key={wallet.address} address={wallet.address} amount={wallet.amountSol} index={index} />
+          ))}
+        </div>
+      ) : (
+        <button
+          className="wallet-stack-summary"
+          id={id}
+          type="button"
+          onClick={() => setExpandedOverride(true)}
+        >
+          <span className="wallet-stack-glyph" aria-hidden="true"><i /><i /><i /></span>
+          <span><strong>{wallets.length.toLocaleString()} wallets</strong><small>Hidden from preview</small></span>
+        </button>
+      )}
     </div>
   );
 }
@@ -601,6 +702,18 @@ function Wallet({ address, amount, index }: { address: string; amount?: string; 
       {amount && <strong>{amount} SOL</strong>}
     </div>
   );
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function jsonSummary(lineCount: number, plan: TransferPlan | null): string {
+  const lines = `${lineCount.toLocaleString()} lines`;
+  if (!plan) return lines;
+  const senders = `${plan.senders.length.toLocaleString()} sender${plan.senders.length === 1 ? "" : "s"}`;
+  const receivers = `${plan.receivers.length.toLocaleString()} receiver${plan.receivers.length === 1 ? "" : "s"}`;
+  return `${lines}; ${senders}, ${receivers}`;
 }
 
 function QuotePanel({ preparation }: { preparation: Preparation | null }) {
