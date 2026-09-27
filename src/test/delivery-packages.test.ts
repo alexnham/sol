@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { economyAdapter } from "@solana-workbench/delivery-economy";
 import { fastAdapter, FAST_TIP_LAMPORTS } from "@solana-workbench/delivery-fast";
 import { maxAdapter, MAX_TIP_LAMPORTS } from "@solana-workbench/delivery-max";
-import type { DeliveryQuoteContext } from "@solana-workbench/delivery-sdk";
+import { rpcCall, type DeliveryQuoteContext } from "@solana-workbench/delivery-sdk";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 const context: DeliveryQuoteContext = {
   network: "mainnet",
@@ -33,5 +37,20 @@ describe("delivery workspace packages", () => {
     expect(maxAdapter.supports("mainnet")).toBe(true);
     expect(quote.priorityFeeLamports).toBe("100000");
     expect(quote.senderTipLamports).toBe(MAX_TIP_LAMPORTS.toString());
+  });
+
+  it("retries an HTTP 429 response using Retry-After", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("rate limited", {
+        status: 429,
+        headers: { "Retry-After": "0" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ jsonrpc: "2.0", result: 42 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+
+    await expect(rpcCall<number>("https://rpc.example", "getSlot")).resolves.toBe(42);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -72,7 +72,62 @@ describe("single transaction builder", () => {
     )).rejects.toThrow("Signer unavailable");
     expect(progress.at(-1)).toBe(`${second.address}:failed`);
   });
+
+  it("compresses eligible recipients through an address lookup table", async () => {
+    const payer = await generateKeyPairSigner();
+    const table = await generateKeyPairSigner();
+    const receivers = await Promise.all(
+      Array.from({ length: 20 }, () => generateKeyPairSigner()),
+    );
+    const base = sharePreparation(
+      payer.address,
+      receivers.map((receiver) => receiver.address),
+    );
+    const inline = await buildPreparedTransaction(base);
+    const compressed = await buildPreparedTransaction({
+      ...base,
+      addressLookupTables: {
+        [table.address]: receivers.map((receiver) => receiver.address),
+      },
+    });
+
+    expect(transactionSize(compressed)).toBeLessThan(transactionSize(inline));
+    expect(transactionSize(compressed)).toBeLessThanOrEqual(1_232);
+  });
 });
+
+function sharePreparation(payer: Address, receivers: Address[]): Preparation {
+  return {
+    preparationId: "test-share-preparation",
+    network: "devnet",
+    preset: "economy",
+    pluginId: "native-sol-transfer",
+    normalizedAlias: false,
+    normalizedPlan: {
+      type: "share",
+      senders: [{ address: payer }],
+      receivers: receivers.map((receiver) => ({ address: receiver, amountSol: "0.00001" })),
+    },
+    feePayer: payer,
+    requiredSigners: [payer],
+    recentBlockhash: "11111111111111111111111111111111",
+    lastValidBlockHeight: "1000",
+    computeUnitLimit: 1_000,
+    microLamportsPerComputeUnit: 0,
+    transactionSizeBytes: 0,
+    quote: {
+      transactionCount: 1,
+      transferLamports: String(receivers.length * 10_000),
+      baseFeeLamports: "5000",
+      priorityFeeLamports: "0",
+      senderTipLamports: "0",
+      totalFeeLamports: "5000",
+      speed: "standard",
+    },
+    balances: {},
+    expiresAtBlockHeight: "1000",
+  };
+}
 
 function consolidationPreparation(
   first: Address,
@@ -99,6 +154,7 @@ function consolidationPreparation(
     lastValidBlockHeight: "1000",
     computeUnitLimit: 1_000,
     microLamportsPerComputeUnit: 0,
+    transactionSizeBytes: 0,
     quote: {
       transactionCount: 1,
       transferLamports: "30000000",

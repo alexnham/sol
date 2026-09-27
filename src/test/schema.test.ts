@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   getFeePayer,
   parseTransferPlan,
+  parseTransferPlanInput,
   PlanValidationError,
   solToLamports,
 } from "../shared/schema";
@@ -27,6 +28,36 @@ describe("transfer plan schema", () => {
       receivers: [{ address: DESTINATION }],
     });
     expect(getFeePayer(plan)).toBe(SOURCE);
+  });
+
+  it("accepts address lookup table account addresses", () => {
+    const { plan } = parseTransferPlan({
+      type: "share",
+      senders: [{ address: SOURCE }],
+      receivers: [{ address: DESTINATION, amountSol: "0.1" }],
+      addressLookupTables: ["9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta"],
+    });
+    expect(plan.addressLookupTables).toEqual([
+      "9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta",
+    ]);
+  });
+
+  it("accepts ALT receiver indexes and inclusive ranges as a preparable input", () => {
+    const result = parseTransferPlanInput({
+      type: "share",
+      senders: [{ address: SOURCE }],
+      receivers: [],
+      receiversFromLookupTables: [{
+        address: "9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta",
+        amountSol: "0.00001",
+        indexes: [0, 4],
+        ranges: [{ start: 10, end: 12 }],
+      }],
+    });
+    expect(result.plan).toBeNull();
+    expect(result.lookupPlan?.receiversFromLookupTables[0]?.ranges).toEqual([
+      { start: 10, end: 12 },
+    ]);
   });
 
   it("rejects overlap and duplicate wallets", () => {

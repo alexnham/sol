@@ -7,8 +7,9 @@ import type {
   TransactionQuote,
   TransferPlan,
   PluginCatalog,
+  LookupTableSharePlanInput,
 } from "../shared/contracts";
-import { lamportsToSol, parseTransferPlan, PlanValidationError } from "../shared/schema";
+import { lamportsToSol, parseTransferPlanInput, PlanValidationError } from "../shared/schema";
 import {
   buildPreparedTransaction,
   encodeSignedTransaction,
@@ -17,24 +18,76 @@ import {
 } from "../shared/transaction";
 import {
   fetchPlugins,
+  fetchAddressLookupTables,
   fetchVaultKeys,
+  createAddressLookupTable,
   generateVaultKeys,
   prepareTransfer,
+  registerAddressLookupTable,
   submitTransfer,
   type VaultKeyMetadata,
+  type CreatedAddressLookupTable,
+  type StoredAddressLookupTable,
 } from "./api";
 import { getSignerProvider } from "./signer-provider";
 import { createVaultSignerProvider } from "./vault-signer";
 
-const SAMPLE = `{
+const SHARE_SAMPLE = `{
   "type": "share",
   "senders": [
     { "address": "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE" }
   ],
   "receivers": [
-    { "address": "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ", "amountSol": "0.10" },
-    { "address": "9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta", "amountSol": "0.25" }
-  ]
+    { "address": "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ", "amountSol": "0.001" },
+    { "address": "9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta", "amountSol": "0.001" }
+  ],
+  "plugin": "native-sol-transfer"
+}`;
+
+const CONSOLIDATION_SAMPLE = `{
+  "type": "consolidation",
+  "senders": [
+    { "address": "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE", "amountSol": "0.001" },
+    { "address": "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ", "amountSol": "0.001" }
+  ],
+  "receivers": [
+    { "address": "9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta" }
+  ],
+  "plugin": "native-sol-transfer"
+}`;
+
+const ALT_EXPLICIT_SAMPLE = `{
+  "type": "share",
+  "senders": [
+    { "address": "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ" }
+  ],
+  "receivers": [
+    { "address": "BApRNbirCZhPJ2uHAcesJNJCEwCz98p9o6W4f6bc4yr1", "amountSol": "0.001" },
+    { "address": "8rb5FTPT3A8HBaYtDAbzduBZsYi18sRy7cyJmuD5AUT4", "amountSol": "0.001" }
+  ],
+  "addressLookupTables": [
+    "Cas5qTBtAr6kPFt1LRW431JkYzqXm2Z49XMD5xAa3wuQ"
+  ],
+  "plugin": "native-sol-transfer"
+}`;
+
+const ALT_SELECTION_SAMPLE = `{
+  "type": "share",
+  "senders": [
+    { "address": "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ" }
+  ],
+  "receivers": [],
+  "receiversFromLookupTables": [
+    {
+      "address": "Cas5qTBtAr6kPFt1LRW431JkYzqXm2Z49XMD5xAa3wuQ",
+      "amountSol": "0.001",
+      "indexes": [0, 4, 9],
+      "ranges": [
+        { "start": 20, "end": 29 }
+      ]
+    }
+  ],
+  "plugin": "native-sol-transfer"
 }`;
 
 const PRESETS: Array<{
@@ -76,7 +129,7 @@ const FALLBACK_DESTINATION = "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<AppTab>("workbench");
-  const [json, setJson] = useState(SAMPLE);
+  const [json, setJson] = useState(SHARE_SAMPLE);
   const [network, setNetwork] = useState<Network>("devnet");
   const [preset, setPreset] = useState<DeliveryPreset>("economy");
   const [preparation, setPreparation] = useState<Preparation | null>(null);
@@ -90,12 +143,13 @@ export default function App() {
     { id: "native-sol-transfer", label: "Native SOL transfer" },
   ]);
   const [vaultKeys, setVaultKeys] = useState<VaultKeyMetadata[]>([]);
+  const [vaultLookupTables, setVaultLookupTables] = useState<StoredAddressLookupTable[]>([]);
   const [vaultBusy, setVaultBusy] = useState(false);
   const [vaultError, setVaultError] = useState<string | null>(null);
   const [editorExpandedOverride, setEditorExpandedOverride] = useState<boolean | null>(null);
 
   const parsed = useMemo(() => parseEditor(json), [json]);
-  const plan = parsed.plan;
+  const plan = preparation?.normalizedPlan ?? parsed.plan;
   const jsonLineCount = json.split("\n").length;
   const jsonIsLarge = jsonLineCount > 40 || json.length > 4_000;
   const editorExpanded = editorExpandedOverride ?? !jsonIsLarge;
@@ -124,7 +178,12 @@ export default function App() {
 
   async function refreshVault() {
     try {
-      setVaultKeys(await fetchVaultKeys());
+      const [keys, lookupTables] = await Promise.all([
+        fetchVaultKeys(),
+        fetchAddressLookupTables(),
+      ]);
+      setVaultKeys(keys);
+      setVaultLookupTables(lookupTables);
       setVaultError(null);
     } catch (reason) {
       setVaultError(reason instanceof Error ? reason.message : "Could not load managed wallets");
@@ -182,6 +241,16 @@ export default function App() {
     setActiveTab("workbench");
   }
 
+  function useLookupTable(tableAddress: string) {
+    if (!plan) return;
+    const nextPlan: TransferPlan = {
+      ...plan,
+      addressLookupTables: [...new Set([...(plan.addressLookupTables ?? []), tableAddress])],
+    };
+    invalidate(JSON.stringify(nextPlan, null, 2));
+    setActiveTab("workbench");
+  }
+
   function invalidate(nextJson?: string) {
     if (nextJson !== undefined) setJson(nextJson);
     setPreparation(null);
@@ -198,12 +267,17 @@ export default function App() {
   }
 
   async function prepare() {
-    if (!parsed.raw || !plan) return;
+    if (!parsed.raw) return;
     setStage("preparing");
     setError(null);
     setResult(null);
     try {
-      const next = await prepareTransfer(parsed.raw, network, preset, plan.plugin ?? pluginId);
+      const next = await prepareTransfer(
+        parsed.raw,
+        network,
+        preset,
+        parsed.plan?.plugin ?? parsed.lookupPlan?.plugin ?? pluginId,
+      );
       setPreparation(next);
       setSignerStatuses(
         Object.fromEntries(next.requiredSigners.map((signer) => [signer, "waiting"])),
@@ -321,6 +395,25 @@ export default function App() {
               <p>Addresses and explicit SOL amounts only. Never paste private keys.</p>
             </div>
             <div className="editor-heading-actions">
+              <select
+                className="demo-template-select"
+                aria-label="Demo template"
+                value=""
+                onChange={(event) => {
+                  const template = event.target.value;
+                  if (template === "share") invalidate(SHARE_SAMPLE);
+                  if (template === "consolidation") invalidate(CONSOLIDATION_SAMPLE);
+                  if (template === "alt-explicit") invalidate(ALT_EXPLICIT_SAMPLE);
+                  if (template === "alt-selection") invalidate(ALT_SELECTION_SAMPLE);
+                  event.target.value = "";
+                }}
+              >
+                <option value="" disabled>Demo template</option>
+                <option value="share">Share example</option>
+                <option value="consolidation">Consolidation example</option>
+                <option value="alt-explicit">ALT · explicit receivers</option>
+                <option value="alt-selection">ALT · indexes and ranges</option>
+              </select>
               {jsonIsLarge && (
                 <button
                   className="editor-collapse-button"
@@ -369,6 +462,8 @@ export default function App() {
               <><span className="message-icon">!</span><span>{parsed.error}</span></>
             ) : parsed.normalizedAlias ? (
               <><span className="message-icon info">i</span><span>“recievers” is supported and will be normalized to “receivers”.</span></>
+            ) : parsed.lookupPlan ? (
+              <><span className="message-icon info">i</span><span>ALT recipient indexes will be resolved when the live quote is prepared.</span></>
             ) : (
               <><span className="message-icon ok">✓</span><span>The plan is ready for a live quote.</span></>
             )}
@@ -411,7 +506,7 @@ export default function App() {
             <span className="one-tx"><strong>1</strong> transaction</span>
           </div>
 
-          <WalletRail plan={plan} />
+          <WalletRail plan={plan} lookupPlan={preparation ? null : parsed.lookupPlan} />
 
           <div className="route-section">
             <div className="section-title">
@@ -470,7 +565,7 @@ export default function App() {
               <span>{stageLabel(stage)}</span>
             </div>
             {!preparation ? (
-              <button className="primary" disabled={!plan || stage === "preparing"} onClick={prepare} type="button">
+              <button className="primary" disabled={!parsed.raw || stage === "preparing"} onClick={prepare} type="button">
                 {stage === "preparing" ? "Preparing live quote…" : "Prepare live quote"}
               </button>
             ) : (
@@ -484,11 +579,14 @@ export default function App() {
       ) : (
         <KeygenPanel
           keypairs={vaultKeys}
+          lookupTables={vaultLookupTables}
+          network={network}
           busy={vaultBusy}
           error={vaultError}
           onGenerate={generateKeys}
           onRefresh={refreshVault}
           onUse={useVaultKeys}
+          onUseLookupTable={useLookupTable}
         />
       )}
 
@@ -512,24 +610,74 @@ export default function App() {
 
 function KeygenPanel({
   keypairs,
+  lookupTables,
+  network,
   busy,
   error,
   onGenerate,
   onRefresh,
   onUse,
+  onUseLookupTable,
 }: {
   keypairs: VaultKeyMetadata[];
+  lookupTables: StoredAddressLookupTable[];
+  network: Network;
   busy: boolean;
   error: string | null;
   onGenerate(count: number): Promise<void>;
   onRefresh(): Promise<void>;
   onUse(addresses: string[], role: "sources" | "destinations"): void;
+  onUseLookupTable(address: string): void;
 }) {
   const [count, setCount] = useState(1);
+  const [randomCount, setRandomCount] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
   const [ledgerExpandedOverride, setLedgerExpandedOverride] = useState<boolean | null>(null);
+  const [altAuthority, setAltAuthority] = useState("");
+  const [altBusy, setAltBusy] = useState(false);
+  const [altError, setAltError] = useState<string | null>(null);
+  const [createdAlt, setCreatedAlt] = useState<CreatedAddressLookupTable | null>(null);
+  const [existingAltAddress, setExistingAltAddress] = useState("");
+  const [registeringAlt, setRegisteringAlt] = useState(false);
   const selectedSet = new Set(selected);
   const ledgerExpanded = ledgerExpandedOverride ?? keypairs.length <= 25;
+  const canSelectRandom = Number.isSafeInteger(randomCount) && randomCount >= 1 && randomCount <= keypairs.length;
+  const resolvedAltAuthority = keypairs.some((keypair) => keypair.address === altAuthority)
+    ? altAuthority
+    : keypairs[0]?.address ?? "";
+
+  async function createSelectedAlt() {
+    if (!resolvedAltAuthority || selected.length < 2 || selected.length > 256) return;
+    if (network === "mainnet" && !window.confirm(
+      `Create and fund a mainnet address lookup table containing ${selected.length} addresses?`,
+    )) return;
+    setAltBusy(true);
+    setAltError(null);
+    setCreatedAlt(null);
+    try {
+      setCreatedAlt(await createAddressLookupTable(network, resolvedAltAuthority, selected));
+      await onRefresh();
+    } catch (reason) {
+      setAltError(reason instanceof Error ? reason.message : "ALT creation failed");
+    } finally {
+      setAltBusy(false);
+    }
+  }
+
+  async function saveExistingAlt() {
+    if (!existingAltAddress.trim()) return;
+    setRegisteringAlt(true);
+    setAltError(null);
+    try {
+      await registerAddressLookupTable(network, existingAltAddress.trim());
+      setExistingAltAddress("");
+      await onRefresh();
+    } catch (reason) {
+      setAltError(reason instanceof Error ? reason.message : "Could not save the ALT");
+    } finally {
+      setRegisteringAlt(false);
+    }
+  }
 
   function toggle(walletAddress: string) {
     setSelected((current) => current.includes(walletAddress)
@@ -562,16 +710,132 @@ function KeygenPanel({
         <span>These files can control funds. Keep them out of Git, backups you do not trust, and shared folders.</span>
       </div>
 
-      <div className="vault-toolbar">
-        <label className="select-all">
-          <input
-            type="checkbox"
-            checked={keypairs.length > 0 && selected.length === keypairs.length}
-            onChange={() => setSelected(selected.length === keypairs.length ? [] : keypairs.map((keypair) => keypair.address))}
-          />
-          {selected.length > 0 ? `${selected.length} selected` : `${keypairs.length} managed`}
-        </label>
+      <section className="alt-builder" aria-labelledby="alt-builder-title">
         <div>
+          <span className="vault-kicker">Address compression</span>
+          <h3 id="alt-builder-title">Create address lookup table</h3>
+          <p>Select 2–256 wallets below. The authority pays rent and transaction fees from its managed balance.</p>
+        </div>
+        <div className="alt-builder-controls">
+          <label htmlFor="alt-authority">Authority / fee payer</label>
+          <select
+            id="alt-authority"
+            value={resolvedAltAuthority}
+            onChange={(event) => setAltAuthority(event.target.value)}
+            disabled={keypairs.length === 0 || altBusy}
+          >
+            {keypairs.map((keypair) => (
+              <option key={keypair.address} value={keypair.address}>{keypair.address}</option>
+            ))}
+          </select>
+          <button
+            className="secondary"
+            type="button"
+            disabled={altBusy || selected.length < 2 || selected.length > 256 || !resolvedAltAuthority}
+            onClick={() => void createSelectedAlt()}
+          >
+            {altBusy ? "Creating and extending…" : `Create ALT from ${selected.length} selected`}
+          </button>
+        </div>
+      </section>
+
+      {altError && <div className="alert error-alert" role="alert"><strong>ALT creation failed</strong><span>{altError}</span></div>}
+      {createdAlt && (
+        <div className="alt-created" role="status">
+          <div><strong>ALT ready on {createdAlt.network}</strong><code>{createdAlt.address}</code><span>{createdAlt.addressCount} addresses · {createdAlt.signatures.length} setup transactions</span></div>
+          <button className="primary" type="button" onClick={() => onUseLookupTable(createdAlt.address)}>Add ALT to transfer JSON</button>
+        </div>
+      )}
+
+      <section className="alt-library" aria-labelledby="alt-library-title">
+        <div className="alt-library-heading">
+          <div>
+            <span className="vault-kicker">Saved metadata</span>
+            <h3 id="alt-library-title">Address lookup tables</h3>
+          </div>
+          <span>{lookupTables.length.toLocaleString()} saved</span>
+        </div>
+        <form className="alt-register" onSubmit={(event) => {
+          event.preventDefault();
+          void saveExistingAlt();
+        }}>
+          <label htmlFor="existing-alt-address">Save existing {network} ALT</label>
+          <div>
+            <input
+              id="existing-alt-address"
+              value={existingAltAddress}
+              placeholder="Lookup table account address"
+              onChange={(event) => setExistingAltAddress(event.target.value)}
+              disabled={registeringAlt}
+            />
+            <button className="secondary" type="submit" disabled={registeringAlt || !existingAltAddress.trim()}>
+              {registeringAlt ? "Checking…" : "Save ALT"}
+            </button>
+          </div>
+        </form>
+        {lookupTables.length === 0 ? (
+          <div className="alt-library-empty">Tables created here will be stored and listed separately from managed wallets.</div>
+        ) : (
+          <ol className="alt-library-list">
+            {lookupTables.map((table) => (
+              <li key={`${table.network}:${table.address}`}>
+                <div className="alt-library-address">
+                  <span className={`alt-network ${table.network}`}>{table.network}</span>
+                  <code title={table.address}>{table.address}</code>
+                </div>
+                <div className="alt-library-meta">
+                  <span><strong>{table.addressCount}</strong> addresses</span>
+                  <span><strong>{table.signatures.length}</strong> setup tx</span>
+                  <span title={table.authority}>{table.authority ? `Authority ${shortAddress(table.authority)}` : "Imported table"}</span>
+                  <span>{formatVaultDate(table.createdAt)}</span>
+                </div>
+                <button
+                  className="secondary"
+                  type="button"
+                  disabled={table.network !== network}
+                  title={table.network !== network ? `Switch to ${table.network} to use this table` : undefined}
+                  onClick={() => onUseLookupTable(table.address)}
+                >
+                  {table.network === network ? "Add to transfer JSON" : `Use on ${table.network}`}
+                </button>
+              </li>
+            ))}
+          </ol>
+        )}
+      </section>
+
+      <div className="vault-toolbar">
+        <div className="vault-selection-tools">
+          <label className="select-all">
+            <input
+              type="checkbox"
+              checked={keypairs.length > 0 && selected.length === keypairs.length}
+              onChange={() => setSelected(selected.length === keypairs.length ? [] : keypairs.map((keypair) => keypair.address))}
+            />
+            {selected.length > 0 ? `${selected.length} selected` : `${keypairs.length} managed`}
+          </label>
+          <form className="random-select-control" onSubmit={(event) => {
+            event.preventDefault();
+            if (!canSelectRandom) return;
+            setSelected(sampleWithoutReplacement(
+              keypairs.map((keypair) => keypair.address),
+              randomCount,
+            ));
+          }}>
+            <label htmlFor="random-wallet-count">Random</label>
+            <input
+              id="random-wallet-count"
+              aria-label="Random wallet count"
+              type="number"
+              min="1"
+              max={Math.max(1, keypairs.length)}
+              value={randomCount}
+              onChange={(event) => setRandomCount(Number(event.target.value))}
+            />
+            <button className="secondary random-select-button" type="submit" disabled={!canSelectRandom}>Select</button>
+          </form>
+        </div>
+        <div className="vault-actions">
           {keypairs.length > 0 && (
             <button
               className="secondary vault-collapse"
@@ -627,7 +891,27 @@ function KeygenPanel({
   );
 }
 
-function WalletRail({ plan }: { plan: TransferPlan | null }) {
+function WalletRail({
+  plan,
+  lookupPlan,
+}: {
+  plan: TransferPlan | null;
+  lookupPlan: LookupTableSharePlanInput | null;
+}) {
+  if (!plan && lookupPlan) {
+    const selectedPositions = lookupPlan.receiversFromLookupTables.reduce((total, selection) => {
+      const indexes = new Set(selection.indexes ?? []);
+      for (const range of selection.ranges ?? []) {
+        for (let index = range.start; index <= range.end; index += 1) indexes.add(index);
+      }
+      return total + indexes.size;
+    }, lookupPlan.receivers.length);
+    return (
+      <div className="empty-flow">
+        {selectedPositions.toLocaleString()} recipient position{selectedPositions === 1 ? "" : "s"} will be resolved from the ALT.
+      </div>
+    );
+  }
   if (!plan) return <div className="empty-flow">Enter a valid plan to map the wallet flow.</div>;
   const sources = plan.senders;
   const destinations = plan.receivers;
@@ -716,6 +1000,28 @@ function jsonSummary(lineCount: number, plan: TransferPlan | null): string {
   return `${lines}; ${senders}, ${receivers}`;
 }
 
+function sampleWithoutReplacement<T>(values: readonly T[], count: number): T[] {
+  const pool = [...values];
+  for (let index = 0; index < count; index += 1) {
+    const swapIndex = index + secureRandomIndex(pool.length - index);
+    [pool[index], pool[swapIndex]] = [pool[swapIndex]!, pool[index]!];
+  }
+  return pool.slice(0, count);
+}
+
+function secureRandomIndex(maxExclusive: number): number {
+  if (!Number.isSafeInteger(maxExclusive) || maxExclusive < 1) {
+    throw new Error("Random selection requires at least one available wallet");
+  }
+  const range = 0x1_0000_0000;
+  const unbiasedLimit = Math.floor(range / maxExclusive) * maxExclusive;
+  const random = new Uint32Array(1);
+  do {
+    crypto.getRandomValues(random);
+  } while (random[0]! >= unbiasedLimit);
+  return random[0]! % maxExclusive;
+}
+
 function QuotePanel({ preparation }: { preparation: Preparation | null }) {
   return (
     <div className={`quote-panel ${preparation ? "quoted" : ""}`}>
@@ -726,7 +1032,10 @@ function QuotePanel({ preparation }: { preparation: Preparation | null }) {
           <div className="quote-meta">
             <span><strong>{preparation.requiredSigners.length}</strong> signer{preparation.requiredSigners.length === 1 ? "" : "s"}</span>
             <span><strong>{preparation.computeUnitLimit.toLocaleString()}</strong> CU limit</span>
-            <span><strong>≤ 1,232</strong> bytes</span>
+            <span><strong>{Object.keys(preparation.addressLookupTables ?? {}).length}</strong> ALT{Object.keys(preparation.addressLookupTables ?? {}).length === 1 ? "" : "s"}</span>
+            <span title={`${1_232 - preparation.transactionSizeBytes} bytes remaining`}>
+              <strong>{preparation.transactionSizeBytes.toLocaleString()} / 1,232</strong> bytes
+            </span>
           </div>
         </>
       ) : (
@@ -781,14 +1090,26 @@ function QuoteRows({ quote }: { quote: TransactionQuote }) {
   );
 }
 
-function parseEditor(value: string): { raw: unknown | null; plan: TransferPlan | null; error: string | null; normalizedAlias: boolean } {
+function parseEditor(value: string): {
+  raw: unknown | null;
+  plan: TransferPlan | null;
+  lookupPlan: LookupTableSharePlanInput | null;
+  error: string | null;
+  normalizedAlias: boolean;
+} {
   try {
     const raw: unknown = JSON.parse(value);
-    const result = parseTransferPlan(raw);
-    return { raw, plan: result.plan, error: null, normalizedAlias: result.normalizedAlias };
+    const result = parseTransferPlanInput(raw);
+    return {
+      raw,
+      plan: result.plan,
+      lookupPlan: result.lookupPlan,
+      error: null,
+      normalizedAlias: result.normalizedAlias,
+    };
   } catch (reason) {
-    if (reason instanceof PlanValidationError) return { raw: null, plan: null, error: reason.issues[0] ?? reason.message, normalizedAlias: false };
-    return { raw: null, plan: null, error: reason instanceof Error ? reason.message : "Invalid JSON", normalizedAlias: false };
+    if (reason instanceof PlanValidationError) return { raw: null, plan: null, lookupPlan: null, error: reason.issues[0] ?? reason.message, normalizedAlias: false };
+    return { raw: null, plan: null, lookupPlan: null, error: reason instanceof Error ? reason.message : "Invalid JSON", normalizedAlias: false };
   }
 }
 

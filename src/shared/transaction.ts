@@ -4,6 +4,7 @@ import {
   assertIsTransactionWithinSizeLimit,
   blockhash,
   compileTransaction,
+  compressTransactionMessageUsingAddressLookupTables,
   createNoopSigner,
   createTransactionMessage,
   getBase64EncodedWireTransaction,
@@ -50,7 +51,7 @@ export async function buildPreparedTransaction(preparation: Preparation): Promis
         ]
       : [];
 
-  const message = pipe(
+  const uncompressedMessage = pipe(
     createTransactionMessage({ version: 0 }),
     (value) => setTransactionMessageFeePayerSigner(createNoopSigner(feePayer), value),
     (value) =>
@@ -63,6 +64,16 @@ export async function buildPreparedTransaction(preparation: Preparation): Promis
       ),
     (value) => appendTransactionMessageInstructions([...computeInstructions, ...userInstructions], value),
   );
+
+  const lookupTables = Object.fromEntries(
+    Object.entries(preparation.addressLookupTables ?? {}).map(([tableAddress, addresses]) => [
+      address(tableAddress),
+      addresses.map((lookupAddress) => address(lookupAddress)),
+    ]),
+  );
+  const message = Object.keys(lookupTables).length
+    ? compressTransactionMessageUsingAddressLookupTables(uncompressedMessage, lookupTables)
+    : uncompressedMessage;
 
   const transaction = compileTransaction(message);
   assertIsTransactionWithinSizeLimit(transaction);

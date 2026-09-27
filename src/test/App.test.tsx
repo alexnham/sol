@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import App from "../client/App";
 
@@ -9,6 +9,50 @@ describe("workbench UI", () => {
     expect(screen.getByRole("button", { name: "Fast delivery route" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Sender Max delivery route" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Prepare live quote" })).toBeEnabled();
+  });
+
+  it("loads valid share and consolidation demo templates", () => {
+    render(<App />);
+    const picker = screen.getByLabelText("Demo template");
+    const editor = screen.getByLabelText("Transfer plan JSON") as HTMLTextAreaElement;
+
+    fireEvent.change(picker, { target: { value: "consolidation" } });
+    expect(JSON.parse(editor.value)).toMatchObject({
+      type: "consolidation",
+      plugin: "native-sol-transfer",
+    });
+    expect(screen.getByRole("heading", { name: "Consolidation flow" })).toBeInTheDocument();
+
+    fireEvent.change(picker, { target: { value: "share" } });
+    expect(JSON.parse(editor.value)).toMatchObject({
+      type: "share",
+      plugin: "native-sol-transfer",
+    });
+    expect(screen.getByRole("heading", { name: "Share flow" })).toBeInTheDocument();
+  });
+
+  it("loads both ALT demo styles", () => {
+    render(<App />);
+    const picker = screen.getByLabelText("Demo template");
+    const editor = screen.getByLabelText("Transfer plan JSON") as HTMLTextAreaElement;
+
+    fireEvent.change(picker, { target: { value: "alt-explicit" } });
+    expect(JSON.parse(editor.value)).toMatchObject({
+      type: "share",
+      receivers: expect.any(Array),
+      addressLookupTables: ["Cas5qTBtAr6kPFt1LRW431JkYzqXm2Z49XMD5xAa3wuQ"],
+    });
+    expect(screen.getByText("The plan is ready for a live quote.")).toBeInTheDocument();
+
+    fireEvent.change(picker, { target: { value: "alt-selection" } });
+    expect(JSON.parse(editor.value)).toMatchObject({
+      type: "share",
+      receiversFromLookupTables: [{
+        indexes: [0, 4, 9],
+        ranges: [{ start: 20, end: 29 }],
+      }],
+    });
+    expect(screen.getByText(/ALT recipient indexes will be resolved/)).toBeInTheDocument();
   });
 
   it("collapses large wallet groups in the Workbench preview", () => {
@@ -69,6 +113,36 @@ describe("workbench UI", () => {
     expect(screen.queryByLabelText(/private|secret/i)).not.toBeInTheDocument();
   });
 
+  it("shows saved ALTs in a section separate from managed wallets", async () => {
+    const tableAddress = "Cas5qTBtAr6kPFt1LRW431JkYzqXm2Z49XMD5xAa3wuQ";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      const body = path.endsWith("/api/address-lookup-tables")
+        ? {
+            addressLookupTables: [{
+              address: tableAddress,
+              authority: "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ",
+              addressCount: 30,
+              signatures: ["signature"],
+              network: "devnet",
+              createdAt: "2026-09-26T00:00:00.000Z",
+            }],
+          }
+        : path.endsWith("/api/keypairs")
+          ? { keypairs: [] }
+          : { transfer: [{ id: "native-sol-transfer", label: "Native SOL transfer" }], delivery: [] };
+      return { ok: true, json: async () => body } as Response;
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Keygen/ }));
+
+    expect(await screen.findByRole("heading", { name: "Address lookup tables" })).toBeInTheDocument();
+    expect(screen.getByText(tableAddress)).toBeInTheDocument();
+    expect(screen.getByText("30", { selector: "strong" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add to transfer JSON" })).toBeEnabled();
+  });
+
   it("collapses large managed-wallet lists by default and lets the operator expand them", async () => {
     const keypairs = Array.from({ length: 30 }, (_, index) => ({
       address: `wallet-${index}`,
@@ -91,10 +165,48 @@ describe("workbench UI", () => {
     const showWallets = await screen.findByRole("button", { name: "Show wallets (30)" });
     expect(showWallets).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("30 managed wallets hidden")).toBeInTheDocument();
-    expect(screen.queryByText("wallet-29")).not.toBeInTheDocument();
+    expect(document.querySelector(".key-ledger")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Random wallet count"), { target: { value: "7" } });
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    expect(screen.getByText("7 selected")).toBeInTheDocument();
 
     fireEvent.click(showWallets);
     expect(screen.getByRole("button", { name: "Hide wallets" })).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("wallet-29")).toBeInTheDocument();
+    expect(screen.getByText("wallet-29", { selector: "code" })).toBeInTheDocument();
+    expect(document.querySelectorAll(".key-ledger input:checked")).toHaveLength(7);
+  });
+
+  it("creates an ALT from selected managed wallets and adds it to the transfer JSON", async () => {
+    const keypairs = [
+      "BApRNbirCZhPJ2uHAcesJNJCEwCz98p9o6W4f6bc4yr1",
+      "8rb5FTPT3A8HBaYtDAbzduBZsYi18sRy7cyJmuD5AUT4",
+      "4yPAtNZ4GRPaFf183evdnKBgL8GRd4vno32P3P8LHUh1",
+    ].map((address) => ({ address, file: "wallets.txt", createdAt: "2026-09-26T00:00:00.000Z" }));
+    const tableAddress = "ABWfHvVKf9t41bwJC3zQAjvsJUweFQb9pQXR8gCroXDR";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      const body = path.endsWith("/api/keypairs")
+        ? { keypairs }
+        : path.endsWith("/api/address-lookup-tables")
+          ? { address: tableAddress, authority: keypairs[0]!.address, addressCount: 2, signatures: ["one", "two"], network: "devnet" }
+          : { transfer: [{ id: "native-sol-transfer", label: "Native SOL transfer" }], delivery: [] };
+      return { ok: true, json: async () => body } as Response;
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Keygen/ }));
+    await screen.findByLabelText("Authority / fee payer");
+    const walletCheckboxes = document.querySelectorAll<HTMLInputElement>(".key-ledger input");
+    fireEvent.click(walletCheckboxes[0]!);
+    fireEvent.click(walletCheckboxes[1]!);
+    fireEvent.click(screen.getByRole("button", { name: "Create ALT from 2 selected" }));
+
+    expect(await screen.findByText("ALT ready on devnet")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add ALT to transfer JSON" }));
+    await waitFor(() => {
+      const editor = screen.getByLabelText("Transfer plan JSON") as HTMLTextAreaElement;
+      expect(editor.value).toContain(tableAddress);
+    });
   });
 });

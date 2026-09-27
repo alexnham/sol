@@ -1,6 +1,6 @@
 import { address } from "@solana/kit";
 import { z } from "zod";
-import type { TransferPlan } from "./contracts";
+import type { LookupTableSharePlanInput, TransferPlan } from "./contracts";
 
 const SOL_PATTERN = /^(?:0|[1-9]\d*)(?:\.\d{1,9})?$/;
 
@@ -20,6 +20,24 @@ const amountSchema = z
 
 const walletSchema = z.object({ address: addressSchema }).strict();
 const walletAmountSchema = walletSchema.extend({ amountSol: amountSchema }).strict();
+const lookupTableIndexSchema = z.number().int().min(0).max(255);
+const lookupTableRangeSchema = z
+  .object({
+    start: lookupTableIndexSchema,
+    end: lookupTableIndexSchema,
+  })
+  .strict()
+  .refine((range) => range.start <= range.end, "Range start must be less than or equal to end");
+const lookupTableReceiverSchema = walletAmountSchema
+  .extend({
+    indexes: z.array(lookupTableIndexSchema).optional(),
+    ranges: z.array(lookupTableRangeSchema).optional(),
+  })
+  .strict()
+  .refine(
+    (selection) => (selection.indexes?.length ?? 0) + (selection.ranges?.length ?? 0) > 0,
+    "Provide at least one index or range",
+  );
 
 const shareSchema = z
   .object({
@@ -28,6 +46,7 @@ const shareSchema = z
     receivers: z.array(walletAmountSchema).min(1),
     feePayer: addressSchema.optional(),
     plugin: z.string().min(1).optional(),
+    addressLookupTables: z.array(addressSchema).optional(),
   })
   .strict();
 
@@ -38,10 +57,23 @@ const consolidationSchema = z
     receivers: z.tuple([walletSchema]),
     feePayer: addressSchema.optional(),
     plugin: z.string().min(1).optional(),
+    addressLookupTables: z.array(addressSchema).optional(),
   })
   .strict();
 
 const planSchema = z.discriminatedUnion("type", [shareSchema, consolidationSchema]);
+
+const lookupTableShareSchema = z
+  .object({
+    type: z.literal("share"),
+    senders: z.tuple([walletSchema]),
+    receivers: z.array(walletAmountSchema).default([]),
+    receiversFromLookupTables: z.array(lookupTableReceiverSchema).min(1),
+    feePayer: addressSchema.optional(),
+    plugin: z.string().min(1).optional(),
+    addressLookupTables: z.array(addressSchema).optional(),
+  })
+  .strict();
 
 export class PlanValidationError extends Error {
   constructor(public readonly issues: string[]) {
@@ -66,6 +98,21 @@ export function parseTransferPlan(input: unknown): {
   plan: TransferPlan;
   normalizedAlias: boolean;
 } {
+  const { source, normalizedAlias } = normalizeReceiverAlias(input);
+
+  const result = planSchema.safeParse(source);
+  if (!result.success) throwZodIssues(result.error.issues);
+
+  const plan = result.data as TransferPlan;
+  assertUniqueWallets(plan);
+
+  return { plan, normalizedAlias };
+}
+
+function normalizeReceiverAlias(input: unknown): {
+  source: Record<string, unknown>;
+  normalizedAlias: boolean;
+} {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new PlanValidationError(["The JSON root must be an object"]);
   }
@@ -79,18 +126,19 @@ export function parseTransferPlan(input: unknown): {
     source.receivers = source.recievers;
     delete source.recievers;
   }
+  return { source, normalizedAlias: hasAlias };
+}
 
-  const result = planSchema.safeParse(source);
-  if (!result.success) {
-    throw new PlanValidationError(
-      result.error.issues.map((issue) => {
-        const location = issue.path.length ? issue.path.join(".") : "plan";
-        return `${location}: ${issue.message}`;
-      }),
-    );
-  }
+function throwZodIssues(issues: readonly z.core.$ZodIssue[]): never {
+  throw new PlanValidationError(
+    issues.map((issue) => {
+      const location = issue.path.length ? issue.path.join(".") : "plan";
+      return `${location}: ${issue.message}`;
+    }),
+  );
+}
 
-  const plan = result.data as TransferPlan;
+function assertUniqueWallets(plan: TransferPlan): void {
   const senderAddresses = plan.senders.map((entry) => entry.address);
   const receiverAddresses = plan.receivers.map((entry) => entry.address);
   const duplicate = [...senderAddresses, ...receiverAddresses].find(
@@ -99,8 +147,42 @@ export function parseTransferPlan(input: unknown): {
   if (duplicate) {
     throw new PlanValidationError([`Wallet ${duplicate} is duplicated or used on both sides`]);
   }
+}
 
-  return { plan, normalizedAlias: hasAlias };
+export function parseLookupTableSharePlan(input: unknown): {
+  plan: LookupTableSharePlanInput;
+  normalizedAlias: boolean;
+} {
+  const { source, normalizedAlias } = normalizeReceiverAlias(input);
+  const result = lookupTableShareSchema.safeParse(source);
+  if (!result.success) throwZodIssues(result.error.issues);
+  return {
+    plan: result.data as LookupTableSharePlanInput,
+    normalizedAlias,
+  };
+}
+
+export function parseTransferPlanInput(input: unknown): {
+  plan: TransferPlan | null;
+  lookupPlan: LookupTableSharePlanInput | null;
+  normalizedAlias: boolean;
+} {
+  try {
+    const parsed = parseTransferPlan(input);
+    return { ...parsed, lookupPlan: null };
+  } catch (reason) {
+    if (!(reason instanceof PlanValidationError)) throw reason;
+    if (
+      !input ||
+      typeof input !== "object" ||
+      Array.isArray(input) ||
+      !("receiversFromLookupTables" in input)
+    ) {
+      throw reason;
+    }
+    const parsed = parseLookupTableSharePlan(input);
+    return { plan: null, lookupPlan: parsed.plan, normalizedAlias: parsed.normalizedAlias };
+  }
 }
 
 export function getFeePayer(plan: TransferPlan): string {

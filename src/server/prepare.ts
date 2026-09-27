@@ -16,12 +16,16 @@ import { deliveryAdapters, transferPlugins } from "../shared/plugin-registry";
 import {
   getFeePayer,
   getTransferTotal,
-  parseTransferPlan,
+  parseTransferPlanInput,
   solToLamports,
 } from "../shared/schema";
 import { buildPreparedTransaction } from "../shared/transaction";
 import { quoteRate } from "./delivery";
 import { rpcCall } from "./rpc";
+import {
+  fetchUsefulLookupTables,
+  resolveLookupTableReceivers,
+} from "./address-lookup-tables";
 
 const TIP_ACCOUNTS = [
   "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE",
@@ -32,6 +36,10 @@ const TIP_ACCOUNTS = [
 
 interface LatestBlockhash {
   value: { blockhash: string; lastValidBlockHeight: number };
+}
+
+interface MultipleAccountsResult {
+  value: Array<{ lamports: number } | null>;
 }
 
 interface SimulationResult {
@@ -51,8 +59,13 @@ export async function prepareTransaction(
   input: PrepareRequest,
   rpcUrl: string,
 ): Promise<StoredPreparation> {
-  const { plan, normalizedAlias } = parseTransferPlan(input.plan);
   validateNetwork(input.network);
+  const parsedInput = parseTransferPlanInput(input.plan);
+  const plan = parsedInput.plan ?? await resolveLookupTableReceivers(
+    rpcUrl,
+    parsedInput.lookupPlan!,
+  );
+  const normalizedAlias = parsedInput.normalizedAlias;
 
   const pluginId = input.pluginId ?? plan.plugin ?? "native-sol-transfer";
   const plugin = transferPlugins.get(pluginId);
@@ -75,6 +88,13 @@ export async function prepareTransaction(
   ]);
   const balances = await fetchBalances(rpcUrl, [...new Set([...requiredSigners, ...wallets(plan)])]);
   const tipAccount = delivery.requiresTipAccount ? selectTipAccount() : undefined;
+  const addressLookupTables = await fetchUsefulLookupTables(
+    rpcUrl,
+    plan.addressLookupTables ?? [],
+    [...wallets(plan), ...(tipAccount ? [tipAccount] : [])].filter(
+      (wallet) => !requiredSigners.includes(wallet),
+    ),
+  );
 
   const provisionalQuote = await delivery.quote({
     network: input.network,
@@ -98,12 +118,15 @@ export async function prepareTransaction(
     lastValidBlockHeight: latest.value.lastValidBlockHeight.toString(),
     computeUnitLimit: 1_000,
     microLamportsPerComputeUnit: 0,
+    transactionSizeBytes: 0,
     tipAccount,
     quote: { transactionCount: 1, ...provisionalQuote },
     balances,
     expiresAtBlockHeight: latest.value.lastValidBlockHeight.toString(),
+    addressLookupTables,
   };
 
+  validateNativeAccountLimit(basePreparation);
   const draft = await buildPreparedTransaction(basePreparation);
   assertIsTransactionWithinSizeLimit(draft);
   const units = await estimateComputeUnits(rpcUrl, getBase64EncodedWireTransaction(draft));
@@ -128,16 +151,42 @@ export async function prepareTransaction(
   };
 
   validateBalances(plan, preparation);
+  validateNativeAccountLimit(preparation);
   const transaction = await buildPreparedTransaction(preparation);
   assertIsTransactionWithinSizeLimit(transaction);
-  if (getTransactionSize(transaction) > 1_232) {
+  const transactionSizeBytes = getTransactionSize(transaction);
+  if (transactionSizeBytes > 1_232) {
     throw new Error("The request cannot fit in one version-0 transaction");
   }
 
+  const finalPreparation: Preparation = {
+    ...preparation,
+    transactionSizeBytes,
+  };
+
   return {
-    preparation,
+    preparation: finalPreparation,
     messageBase64: Buffer.from(transaction.messageBytes).toString("base64"),
   };
+}
+
+function validateNativeAccountLimit(preparation: Preparation): void {
+  if (preparation.pluginId !== "native-sol-transfer") return;
+  const planAddresses = wallets(preparation.normalizedPlan);
+  const accountAddresses = new Set([
+    ...planAddresses,
+    ...preparation.requiredSigners,
+    "11111111111111111111111111111111",
+    ...(preparation.microLamportsPerComputeUnit > 0
+      ? ["ComputeBudget111111111111111111111111111111"]
+      : []),
+    ...(preparation.tipAccount ? [preparation.tipAccount] : []),
+  ]);
+  if (accountAddresses.size > 64) {
+    throw new Error(
+      `This transaction references ${accountAddresses.size} accounts; Solana v0 transactions allow at most 64, even with address lookup tables`,
+    );
+  }
 }
 
 function validateNetwork(value: string): asserts value is Network {
@@ -153,16 +202,25 @@ function selectTipAccount(): string {
 }
 
 async function fetchBalances(rpcUrl: string, addresses: string[]): Promise<Record<string, string>> {
-  const entries = await Promise.all(
-    addresses.map(async (wallet) => {
-      address(wallet);
-      const response = await rpcCall<{ value: number }>(rpcUrl, "getBalance", [
-        wallet,
-        { commitment: "confirmed" },
-      ]);
-      return [wallet, response.value.toString()] as const;
-    }),
-  );
+  const uniqueAddresses = [...new Set(addresses)];
+  uniqueAddresses.forEach((wallet) => address(wallet));
+  const entries: Array<readonly [string, string]> = [];
+
+  // Solana RPC permits up to 100 addresses per getMultipleAccounts request. A single batch
+  // replaces the previous one-request-per-wallet burst for every valid v0 transaction.
+  for (let offset = 0; offset < uniqueAddresses.length; offset += 100) {
+    const batch = uniqueAddresses.slice(offset, offset + 100);
+    const response = await rpcCall<MultipleAccountsResult>(rpcUrl, "getMultipleAccounts", [
+      batch,
+      { commitment: "confirmed", encoding: "base64", dataSlice: { offset: 0, length: 0 } },
+    ]);
+    if (response.value.length !== batch.length) {
+      throw new Error("RPC returned an incomplete balance batch");
+    }
+    response.value.forEach((account, index) => {
+      entries.push([batch[index]!, String(account?.lamports ?? 0)] as const);
+    });
+  }
   return Object.fromEntries(entries);
 }
 

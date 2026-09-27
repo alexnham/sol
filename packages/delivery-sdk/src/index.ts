@@ -51,16 +51,46 @@ interface RpcEnvelope<T> {
 }
 
 export async function rpcCall<T>(rpcUrl: string, method: string, params: unknown[] = []): Promise<T> {
-  const response = await fetch(rpcUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: method, method, params }),
-  });
-  if (!response.ok) throw new Error(`RPC ${response.status}: ${await response.text()}`);
-  const body = (await response.json()) as RpcEnvelope<T>;
-  if (body.error) throw new Error(`${body.error.message} (${body.error.code})`);
-  if (body.result === undefined) throw new Error(`RPC ${method} returned no result`);
-  return body.result;
+  const maxAttempts = 4;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const response = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: method, method, params }),
+    });
+    if (!response.ok) {
+      const responseText = await response.text();
+      if (response.status === 429 && attempt + 1 < maxAttempts) {
+        await delay(retryDelayMs(response.headers.get("retry-after"), attempt));
+        continue;
+      }
+      throw new Error(`RPC ${response.status}: ${responseText}`);
+    }
+
+    const body = (await response.json()) as RpcEnvelope<T>;
+    if (body.error) {
+      if (body.error.code === -32429 && attempt + 1 < maxAttempts) {
+        await delay(retryDelayMs(null, attempt));
+        continue;
+      }
+      throw new Error(`${body.error.message} (${body.error.code})`);
+    }
+    if (body.result === undefined) throw new Error(`RPC ${method} returned no result`);
+    return body.result;
+  }
+  throw new Error(`RPC ${method} exhausted its retry limit`);
+}
+
+function retryDelayMs(retryAfter: string | null, attempt: number): number {
+  if (retryAfter !== null) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(5_000, seconds * 1_000);
+  }
+  return Math.min(2_000, 250 * (2 ** attempt));
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 export async function waitForConfirmation(

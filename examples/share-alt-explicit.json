@@ -1,0 +1,22 @@
+{
+  "type": "share",
+  "senders": [
+    {
+      "address": "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ"
+    }
+  ],
+  "receivers": [
+    {
+      "address": "BApRNbirCZhPJ2uHAcesJNJCEwCz98p9o6W4f6bc4yr1",
+      "amountSol": "0.001"
+    },
+    {
+      "address": "8rb5FTPT3A8HBaYtDAbzduBZsYi18sRy7cyJmuD5AUT4",
+      "amountSol": "0.001"
+    }
+  ],
+  "addressLookupTables": [
+    "Cas5qTBtAr6kPFt1LRW431JkYzqXm2Z49XMD5xAa3wuQ"
+  ],
+  "plugin": "native-sol-transfer"
+}

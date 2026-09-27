@@ -12,6 +12,24 @@ export interface VaultKeyMetadata {
   createdAt: string;
 }
 
+export interface CreatedAddressLookupTable {
+  address: string;
+  authority: string;
+  addressCount: number;
+  signatures: string[];
+  network: Network;
+  createdAt: string;
+}
+
+export interface StoredAddressLookupTable {
+  address: string;
+  authority?: string;
+  addressCount: number;
+  signatures: string[];
+  network: Network;
+  createdAt: string;
+}
+
 async function request<T>(path: string, init: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -59,6 +77,35 @@ export async function generateVaultKeys(count: number): Promise<VaultKeyMetadata
     body: JSON.stringify({ count }),
   });
   return result.keypairs;
+}
+
+export function createAddressLookupTable(
+  network: Network,
+  authority: string,
+  addresses: string[],
+): Promise<CreatedAddressLookupTable> {
+  return request("/api/address-lookup-tables", {
+    method: "POST",
+    body: JSON.stringify({ network, authority, addresses }),
+  });
+}
+
+export async function fetchAddressLookupTables(): Promise<StoredAddressLookupTable[]> {
+  const result = await request<{ addressLookupTables: StoredAddressLookupTable[] }>(
+    "/api/address-lookup-tables",
+    { method: "GET" },
+  );
+  return result.addressLookupTables ?? [];
+}
+
+export function registerAddressLookupTable(
+  network: Network,
+  tableAddress: string,
+): Promise<StoredAddressLookupTable> {
+  return request("/api/address-lookup-tables/register", {
+    method: "POST",
+    body: JSON.stringify({ network, address: tableAddress }),
+  });
 }
 
 export function requestVaultSignature(

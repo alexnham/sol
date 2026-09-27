@@ -1,0 +1,23 @@
+{
+  "type": "share",
+  "senders": [
+    {
+      "address": "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ"
+    }
+  ],
+  "receivers": [],
+  "receiversFromLookupTables": [
+    {
+      "address": "Cas5qTBtAr6kPFt1LRW431JkYzqXm2Z49XMD5xAa3wuQ",
+      "amountSol": "0.001",
+      "indexes": [0, 4, 9],
+      "ranges": [
+        {
+          "start": 20,
+          "end": 29
+        }
+      ]
+    }
+  ],
+  "plugin": "native-sol-transfer"
+}

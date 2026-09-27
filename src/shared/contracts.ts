@@ -34,12 +34,23 @@ export interface WalletAmount extends WalletAddress {
   amountSol: string;
 }
 
+export interface LookupTableIndexRange {
+  start: number;
+  end: number;
+}
+
+export interface LookupTableReceiverSelection extends WalletAmount {
+  indexes?: number[];
+  ranges?: LookupTableIndexRange[];
+}
+
 export interface SharePlan {
   type: "share";
   senders: [WalletAddress];
   receivers: WalletAmount[];
   feePayer?: string;
   plugin?: string;
+  addressLookupTables?: string[];
 }
 
 export interface ConsolidationPlan {
@@ -48,9 +59,20 @@ export interface ConsolidationPlan {
   receivers: [WalletAddress];
   feePayer?: string;
   plugin?: string;
+  addressLookupTables?: string[];
 }
 
 export type TransferPlan = SharePlan | ConsolidationPlan;
+
+export interface LookupTableSharePlanInput {
+  type: "share";
+  senders: [WalletAddress];
+  receivers: WalletAmount[];
+  receiversFromLookupTables: LookupTableReceiverSelection[];
+  feePayer?: string;
+  plugin?: string;
+  addressLookupTables?: string[];
+}
 
 export interface ValidationResult {
   ok: boolean;
@@ -95,10 +117,14 @@ export interface Preparation {
   lastValidBlockHeight: string;
   computeUnitLimit: number;
   microLamportsPerComputeUnit: number;
+  /** Exact serialized wire size of the final unsigned transaction, including signature slots. */
+  transactionSizeBytes: number;
   tipAccount?: string;
   quote: TransactionQuote;
   balances: Record<string, string>;
   expiresAtBlockHeight: string;
+  /** Ordered lookup-table contents used to compile the exact same v0 message on client and server. */
+  addressLookupTables?: Record<string, string[]>;
 }
 
 export interface PrepareRequest {

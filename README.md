@@ -44,7 +44,7 @@ npm run import-key
 
 The command derives the public address for confirmation and writes a new owner-readable vault file. Do not pass the private key as a command-line argument. For non-interactive input, pipe the key and add `--yes` only after independently verifying the derived address.
 
-The UI also includes a **Keygen** tab. It lists public metadata from compatible files in `generated-keys/`, generates up to 1,000 wallets per request, and can place selected wallets into the workbench as sources or destinations. Selecting multiple sources creates a consolidation plan; selecting destinations creates a share plan with editable `0.01 SOL` defaults.
+The UI also includes a **Keygen** tab. It lists public metadata from compatible files in `generated-keys/`, generates up to 1,000 wallets per request, and can place selected wallets into the workbench as sources or destinations. Selecting multiple sources creates a consolidation plan; selecting destinations creates a share plan with editable `0.01 SOL` defaults. It can also create an address lookup table from 2–256 selected managed wallets and add the new table address to the transfer JSON.
 
 Private-key bytes never enter the browser. Managed signing happens through the localhost API, which signs only a transaction whose message exactly matches an active server-side preparation and only for an address that preparation requires. External `SignerProvider` adapters can still supply any signers not present in the local vault.
 
@@ -74,6 +74,13 @@ Compose publishes only to the host loopback interface. Do not commit a real `.en
 
 ## JSON plans
 
+Use the **Demo template** picker above the JSON editor to load a valid share or consolidation
+example. The same copy-ready plans are available in `examples/share.json` and
+`examples/consolidation.json`. ALT examples are available in
+`examples/share-alt-explicit.json` and `examples/share-alt-selection.json`. Replace the public
+addresses and lookup-table address with accounts you control before preparing or submitting a
+transaction.
+
 Share:
 
 ```json
@@ -100,7 +107,84 @@ Consolidation:
 }
 ```
 
-`recievers` is accepted as an alias and normalized. `feePayer` and `plugin` are optional. Amounts are exact decimal strings with at most nine decimal places.
+`recievers` is accepted as an alias and normalized. `feePayer`, `plugin`, and
+`addressLookupTables` are optional. Amounts are exact decimal strings with at most nine decimal
+places.
+
+### Address lookup tables
+
+To compress recipient addresses into an existing on-chain address lookup table (ALT), add its
+address to the plan:
+
+```json
+{
+  "type": "share",
+  "senders": [{ "address": "SOURCE_ADDRESS" }],
+  "receivers": [
+    { "address": "DESTINATION_1", "amountSol": "0.10" },
+    { "address": "DESTINATION_2", "amountSol": "0.25" }
+  ],
+  "addressLookupTables": ["LOOKUP_TABLE_ACCOUNT_ADDRESS"]
+}
+```
+
+The server fetches the tables through the configured Helius RPC, chooses the smallest useful set,
+and returns their ordered contents in the preparation so the browser compiles the identical v0
+message. A table is skipped when it matches fewer than two otherwise-inline accounts because its
+fixed reference overhead would make the transaction larger.
+
+The ALT can also supply share recipients by zero-based index or inclusive index range:
+
+```json
+{
+  "type": "share",
+  "senders": [{ "address": "SOURCE_ADDRESS" }],
+  "receivers": [],
+  "receiversFromLookupTables": [
+    {
+      "address": "LOOKUP_TABLE_ACCOUNT_ADDRESS",
+      "amountSol": "0.00001",
+      "indexes": [0, 4, 9],
+      "ranges": [{ "start": 20, "end": 29 }]
+    }
+  ]
+}
+```
+
+`indexes` and `ranges` may be combined. Overlapping positions within one selector are deduplicated,
+then expanded in ascending index order. The server rejects indexes outside the table and duplicate
+wallets across selectors. Referenced tables are automatically added to `addressLookupTables`.
+The expanded transaction must still fit Solana's 64-account and 1,232-byte limits.
+
+To create a table in the UI:
+
+1. Open **Keygen** and select 2–256 managed wallets.
+2. Choose a managed wallet as the ALT authority and fee payer. It must have enough SOL on the
+   selected network to pay rent and transaction fees.
+3. Select **Create ALT**. The server creates the table and adds the first 30 addresses atomically,
+   extends it in additional batches of 30, confirms every transaction, and waits for the entries
+   to become active.
+4. Select **Add ALT to transfer JSON** to use it in the current plan.
+
+Created tables are saved to `generated-keys/address-lookup-tables.json` and displayed in a separate
+**Address lookup tables** section in Keygen. This registry contains public metadata and table
+entries only—never secret keys. To save a table created elsewhere, select its network, paste its
+account address into **Save existing ALT**, and the server will verify and load it from the RPC
+before recording it. Tables from both networks remain visible, while the add-to-JSON action is
+enabled only for the currently selected network.
+
+Creation submits `ceil(address count / 30)` setup transactions because the create instruction and
+first extension share one transaction.
+Creating tables on mainnet requires an extra browser confirmation. A selection larger than 256
+must be split across separate table creations.
+
+Each ALT must contain the intended recipients and be active before preparing the transfer. A table
+can store 256 addresses, but a v0 transaction can still reference at most 64 total accounts and
+must still fit in 1,232 bytes. Signers cannot be loaded from an ALT. For native SOL sharing, use one
+table containing all recipient addresses when possible; supplying more tables only helps when the
+addresses are already spread across them.
+
+References: [Helius Solana programming model](https://www.helius.dev/blog/the-solana-programming-model-an-introduction-to-developing-on-solana) and the [Solana ALT guide](https://solana.com/developers/cookbook/transactions/lookup-tables).
 
 ## Attach signing
 

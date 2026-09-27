@@ -80,6 +80,13 @@ export async function signWithVaultKey(
   return Buffer.from(signature).toString("base64");
 }
 
+export async function getVaultSigner(signerAddress: string): Promise<KeyPairSigner> {
+  address(signerAddress);
+  const stored = (await readVault()).find((keypair) => keypair.address === signerAddress);
+  if (!stored) throw new Error(`No managed key is available for ${signerAddress}`);
+  return createKeyPairSignerFromBytes(new Uint8Array(stored.secretKey));
+}
+
 async function readVault(): Promise<StoredKeypair[]> {
   await mkdir(vaultDirectory, { recursive: true, mode: 0o700 });
   const files = (await readdir(vaultDirectory)).filter((file) => file.endsWith(".txt")).sort();
