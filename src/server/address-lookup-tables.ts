@@ -84,7 +84,7 @@ async function fetchLookupTables(
 
 /**
  * Fetches existing on-chain ALTs and keeps only tables that save space for this transaction.
- * A v0 transaction has a 64-account runtime ceiling, so adding every available table is not useful.
+ * The exact loaded-account/runtime boundary is enforced by candidate simulation.
  */
 export async function fetchUsefulLookupTables(
   rpcUrl: string,

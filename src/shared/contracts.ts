@@ -25,6 +25,7 @@ export type {
 } from "@solana-workbench/delivery-sdk";
 
 export type TransferType = "share" | "consolidation";
+export type TransactionVersion = 0 | 1;
 
 export interface WalletAddress {
   address: string;
@@ -85,7 +86,9 @@ export interface TransferContext {
 }
 
 export interface BuildContext extends TransferContext {
+  transactionVersion: TransactionVersion;
   feePayer: Address;
+  distributorProgramId?: Address;
   tipAccount?: Address;
   tipLamports: bigint;
 }
@@ -108,7 +111,10 @@ export interface Preparation {
   preparationId: string;
   network: Network;
   preset: DeliveryPreset;
+  transactionVersion: TransactionVersion;
   pluginId: string;
+  /** Deployed stateless SOL distributor used by share plans. */
+  distributorProgramId?: string;
   normalizedPlan: TransferPlan;
   normalizedAlias: boolean;
   feePayer: string;
@@ -117,6 +123,8 @@ export interface Preparation {
   lastValidBlockHeight: string;
   computeUnitLimit: number;
   microLamportsPerComputeUnit: number;
+  /** Required v1 resource limit; omitted for v0 messages. */
+  loadedAccountsDataSizeLimit?: number;
   /** Exact serialized wire size of the final unsigned transaction, including signature slots. */
   transactionSizeBytes: number;
   tipAccount?: string;
@@ -131,6 +139,7 @@ export interface PrepareRequest {
   plan: unknown;
   network: Network;
   preset: DeliveryPreset;
+  transactionVersion: TransactionVersion;
   pluginId?: string;
 }
 

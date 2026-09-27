@@ -20,6 +20,7 @@ import {
   getSetComputeUnitLimitInstruction,
   getSetComputeUnitPriceInstruction,
 } from "@solana-program/compute-budget";
+import { buildV1Transaction } from "@solana-workbench/transaction-v1";
 import type { Preparation, SignerProvider } from "./contracts";
 import { transferPlugins } from "./plugin-registry";
 
@@ -36,20 +37,39 @@ export async function buildPreparedTransaction(preparation: Preparation): Promis
   const userInstructions = await plugin.buildInstructions({
     plan: preparation.normalizedPlan,
     network: preparation.network,
+    transactionVersion: preparation.transactionVersion,
     feePayer,
+    distributorProgramId: preparation.distributorProgramId
+      ? address(preparation.distributorProgramId)
+      : undefined,
     tipAccount: preparation.tipAccount ? address(preparation.tipAccount) : undefined,
     tipLamports: BigInt(preparation.quote.senderTipLamports),
   });
 
-  const computeInstructions =
-    preparation.microLamportsPerComputeUnit > 0
-      ? [
-          getSetComputeUnitPriceInstruction({
-            microLamports: preparation.microLamportsPerComputeUnit,
-          }),
-          getSetComputeUnitLimitInstruction({ units: preparation.computeUnitLimit }),
-        ]
-      : [];
+  if (preparation.transactionVersion === 1) {
+    return buildV1Transaction({
+      feePayer: createNoopSigner(feePayer),
+      lifetime: {
+        blockhash: blockhash(preparation.recentBlockhash),
+        lastValidBlockHeight: BigInt(preparation.lastValidBlockHeight),
+      },
+      instructions: userInstructions,
+      config: {
+        computeUnitLimit: preparation.computeUnitLimit,
+        loadedAccountsDataSizeLimit: preparation.loadedAccountsDataSizeLimit ?? 1,
+        priorityFeeLamports: BigInt(preparation.quote.priorityFeeLamports),
+      },
+    });
+  }
+
+  const computeInstructions = [
+    ...(preparation.microLamportsPerComputeUnit > 0
+      ? [getSetComputeUnitPriceInstruction({
+          microLamports: preparation.microLamportsPerComputeUnit,
+        })]
+      : []),
+    getSetComputeUnitLimitInstruction({ units: preparation.computeUnitLimit }),
+  ];
 
   const uncompressedMessage = pipe(
     createTransactionMessage({ version: 0 }),

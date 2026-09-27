@@ -11,6 +11,7 @@ import type {
   PrepareRequest,
   TransactionQuote,
   TransferPlan,
+  SharePlan,
 } from "../shared/contracts";
 import { deliveryAdapters, transferPlugins } from "../shared/plugin-registry";
 import {
@@ -25,6 +26,7 @@ import { rpcCall } from "./rpc";
 import {
   fetchUsefulLookupTables,
   resolveLookupTableReceivers,
+  selectUsefulLookupTables,
 } from "./address-lookup-tables";
 
 const TIP_ACCOUNTS = [
@@ -43,7 +45,12 @@ interface MultipleAccountsResult {
 }
 
 interface SimulationResult {
-  value: { err: unknown; unitsConsumed?: number };
+  value: {
+    err: unknown;
+    logs?: string[] | null;
+    unitsConsumed?: number;
+    loadedAccountsDataSize?: number;
+  };
 }
 
 interface PriorityFeeResult {
@@ -55,11 +62,13 @@ export interface StoredPreparation {
   messageBase64: string;
 }
 
-export async function prepareTransaction(
+export async function prepareTransactions(
   input: PrepareRequest,
   rpcUrl: string,
-): Promise<StoredPreparation> {
+  distributorProgramId?: string,
+): Promise<StoredPreparation[]> {
   validateNetwork(input.network);
+  validateTransactionVersion(input.transactionVersion);
   const parsedInput = parseTransferPlanInput(input.plan);
   const plan = parsedInput.plan ?? await resolveLookupTableReceivers(
     rpcUrl,
@@ -74,6 +83,16 @@ export async function prepareTransaction(
   }
   const pluginValidation = plugin.validate({ plan, network: input.network });
   if (!pluginValidation.ok) throw new Error(pluginValidation.errors.join("; "));
+  const usesDistributor = input.transactionVersion === 0 &&
+    pluginId === "native-sol-transfer" && plan.type === "share";
+  const usesV1SystemShare = input.transactionVersion === 1 &&
+    pluginId === "native-sol-transfer" && plan.type === "share";
+  if (usesDistributor) {
+    if (!distributorProgramId) {
+      throw new Error(`DISTRIBUTOR_PROGRAM_ID_${input.network.toUpperCase()} is not configured`);
+    }
+    address(distributorProgramId);
+  }
 
   const delivery = deliveryAdapters.get(input.preset);
   if (!delivery.supports(input.network)) {
@@ -87,110 +106,211 @@ export async function prepareTransaction(
     { commitment: "confirmed" },
   ]);
   const balances = await fetchBalances(rpcUrl, [...new Set([...requiredSigners, ...wallets(plan)])]);
+  validateTransferBalances(plan, feePayer, balances);
   const tipAccount = delivery.requiresTipAccount ? selectTipAccount() : undefined;
-  const addressLookupTables = await fetchUsefulLookupTables(
-    rpcUrl,
-    plan.addressLookupTables ?? [],
-    [...wallets(plan), ...(tipAccount ? [tipAccount] : [])].filter(
-      (wallet) => !requiredSigners.includes(wallet),
-    ),
-  );
+  const allAddressLookupTables = input.transactionVersion === 0
+    ? await fetchUsefulLookupTables(
+        rpcUrl,
+        plan.addressLookupTables ?? [],
+        [...wallets(plan), ...(tipAccount ? [tipAccount] : [])].filter(
+          (wallet) => !requiredSigners.includes(wallet),
+        ),
+      )
+    : {};
 
   const provisionalQuote = await delivery.quote({
     network: input.network,
     preset: input.preset,
+    transactionVersion: input.transactionVersion,
     computeUnitLimit: 1_000,
     recommendedMicroLamports: 0,
     signerCount: requiredSigners.length,
     transferLamports: getTransferTotal(plan),
   });
-
-  const basePreparation: Preparation = {
-    preparationId: crypto.randomUUID(),
+  const common = {
     network: input.network,
     preset: input.preset,
+    transactionVersion: input.transactionVersion,
     pluginId,
-    normalizedPlan: plan,
     normalizedAlias,
     feePayer,
     requiredSigners,
     recentBlockhash: latest.value.blockhash,
     lastValidBlockHeight: latest.value.lastValidBlockHeight.toString(),
-    computeUnitLimit: 1_000,
-    microLamportsPerComputeUnit: 0,
-    transactionSizeBytes: 0,
     tipAccount,
-    quote: { transactionCount: 1, ...provisionalQuote },
     balances,
     expiresAtBlockHeight: latest.value.lastValidBlockHeight.toString(),
-    addressLookupTables,
+    distributorProgramId,
   };
 
-  validateNativeAccountLimit(basePreparation);
-  const draft = await buildPreparedTransaction(basePreparation);
-  assertIsTransactionWithinSizeLimit(draft);
-  const units = await estimateComputeUnits(rpcUrl, getBase64EncodedWireTransaction(draft));
-  const computeUnitLimit = Math.min(1_400_000, Math.max(1_000, Math.ceil(units * 1.1)));
-  const recommendedMicroLamports =
-    input.preset === "economy" ? 0 : await fetchPriorityFee(rpcUrl, wallets(plan));
-  const quoteWithoutCount = await delivery.quote({
-    network: input.network,
-    preset: input.preset,
-    computeUnitLimit,
-    recommendedMicroLamports,
-    signerCount: requiredSigners.length,
-    transferLamports: getTransferTotal(plan),
-  });
-  const quote: TransactionQuote = { transactionCount: 1, ...quoteWithoutCount };
+  const plans = usesDistributor || usesV1SystemShare
+    ? await findLargestValidShareBatches(
+        plan as SharePlan,
+        common,
+        allAddressLookupTables,
+        provisionalQuote,
+        rpcUrl,
+      )
+    : [{ plan, ...(await simulatePlan(plan, common, allAddressLookupTables, provisionalQuote, rpcUrl)) }];
 
-  const preparation: Preparation = {
-    ...basePreparation,
-    computeUnitLimit,
-    microLamportsPerComputeUnit: quoteRate(quoteWithoutCount, computeUnitLimit),
-    quote,
-  };
-
-  validateBalances(plan, preparation);
-  validateNativeAccountLimit(preparation);
-  const transaction = await buildPreparedTransaction(preparation);
-  assertIsTransactionWithinSizeLimit(transaction);
-  const transactionSizeBytes = getTransactionSize(transaction);
-  if (transactionSizeBytes > 1_232) {
-    throw new Error("The request cannot fit in one version-0 transaction");
+  const stored: StoredPreparation[] = [];
+  for (const item of plans) {
+    const recommendedMicroLamports = input.preset === "economy" || input.preset === "custom"
+      ? 0
+      : await fetchPriorityFee(rpcUrl, wallets(item.plan));
+    const computeUnitLimit = Math.min(1_400_000, Math.max(1_000, Math.ceil(item.units * 1.1)));
+    const loadedAccountsDataSizeLimit = input.transactionVersion === 1
+      ? Math.min(64 * 1024 * 1024, Math.max(1, Math.ceil((item.loadedAccountsDataSize ?? 1) * 1.1)))
+      : undefined;
+    const quoteWithoutCount = await delivery.quote({
+      network: input.network,
+      preset: input.preset,
+      transactionVersion: input.transactionVersion,
+      computeUnitLimit,
+      recommendedMicroLamports,
+      signerCount: requiredSigners.length,
+      transferLamports: getTransferTotal(item.plan),
+    });
+    const quote: TransactionQuote = {
+      transactionCount: plans.length,
+      ...quoteWithoutCount,
+    };
+    const preparation = makePreparation(
+      item.plan,
+      common,
+      selectBatchLookupTables(allAddressLookupTables, item.plan, requiredSigners, tipAccount),
+      quote,
+      computeUnitLimit,
+      quoteRate(quoteWithoutCount, computeUnitLimit),
+      loadedAccountsDataSizeLimit,
+    );
+    const transaction = await buildPreparedTransaction(preparation);
+    assertIsTransactionWithinSizeLimit(transaction);
+    if (input.transactionVersion === 1) {
+      await estimateComputeUnits(rpcUrl, getBase64EncodedWireTransaction(transaction));
+    }
+    const finalPreparation = {
+      ...preparation,
+      transactionSizeBytes: getTransactionSize(transaction),
+    };
+    stored.push({
+      preparation: finalPreparation,
+      messageBase64: Buffer.from(transaction.messageBytes).toString("base64"),
+    });
   }
 
-  const finalPreparation: Preparation = {
-    ...preparation,
-    transactionSizeBytes,
-  };
+  validateAggregateBalances(plan, feePayer, balances, stored.map(({ preparation }) => preparation));
+  return stored;
+}
 
+type PreparationCommon = Omit<Preparation,
+  "preparationId" | "normalizedPlan" | "computeUnitLimit" |
+  "microLamportsPerComputeUnit" | "transactionSizeBytes" | "quote" |
+  "addressLookupTables" | "loadedAccountsDataSizeLimit"
+>;
+
+function makePreparation(
+  plan: TransferPlan,
+  common: PreparationCommon,
+  addressLookupTables: Record<string, string[]>,
+  quote: TransactionQuote,
+  computeUnitLimit: number,
+  microLamportsPerComputeUnit: number,
+  loadedAccountsDataSizeLimit?: number,
+): Preparation {
   return {
-    preparation: finalPreparation,
-    messageBase64: Buffer.from(transaction.messageBytes).toString("base64"),
+    ...common,
+    preparationId: crypto.randomUUID(),
+    normalizedPlan: plan,
+    computeUnitLimit,
+    microLamportsPerComputeUnit,
+    ...(loadedAccountsDataSizeLimit === undefined ? {} : { loadedAccountsDataSizeLimit }),
+    transactionSizeBytes: 0,
+    quote,
+    addressLookupTables,
   };
 }
 
-function validateNativeAccountLimit(preparation: Preparation): void {
-  if (preparation.pluginId !== "native-sol-transfer") return;
-  const planAddresses = wallets(preparation.normalizedPlan);
-  const accountAddresses = new Set([
-    ...planAddresses,
-    ...preparation.requiredSigners,
-    "11111111111111111111111111111111",
-    ...(preparation.microLamportsPerComputeUnit > 0
-      ? ["ComputeBudget111111111111111111111111111111"]
-      : []),
-    ...(preparation.tipAccount ? [preparation.tipAccount] : []),
-  ]);
-  if (accountAddresses.size > 64) {
-    throw new Error(
-      `This transaction references ${accountAddresses.size} accounts; Solana v0 transactions allow at most 64, even with address lookup tables`,
-    );
+async function findLargestValidShareBatches(
+  plan: SharePlan,
+  common: PreparationCommon,
+  lookupTables: Record<string, string[]>,
+  provisionalQuote: Omit<TransactionQuote, "transactionCount">,
+  rpcUrl: string,
+): Promise<Array<{ plan: SharePlan; units: number; loadedAccountsDataSize?: number }>> {
+  const batches: Array<{ plan: SharePlan; units: number; loadedAccountsDataSize?: number }> = [];
+  let offset = 0;
+
+  while (offset < plan.receivers.length) {
+    let low = 1;
+    let high = plan.receivers.length - offset;
+    let best: { plan: SharePlan; units: number; loadedAccountsDataSize?: number } | null = null;
+    let firstFailure: Error | null = null;
+
+    while (low <= high) {
+      const count = Math.floor((low + high) / 2);
+      const candidate = { ...plan, receivers: plan.receivers.slice(offset, offset + count) };
+      try {
+        const estimate = await simulatePlan(candidate, common, lookupTables, provisionalQuote, rpcUrl);
+        best = { plan: candidate, ...estimate };
+        low = count + 1;
+      } catch (reason) {
+        firstFailure = reason instanceof Error ? reason : new Error(String(reason));
+        high = count - 1;
+      }
+    }
+
+    if (!best) throw firstFailure ?? new Error("One recipient cannot fit in a transaction");
+    batches.push(best);
+    offset += best.plan.receivers.length;
   }
+  return batches;
+}
+
+async function simulatePlan(
+  plan: TransferPlan,
+  common: PreparationCommon,
+  lookupTables: Record<string, string[]>,
+  provisionalQuote: Omit<TransactionQuote, "transactionCount">,
+  rpcUrl: string,
+): Promise<{ units: number; loadedAccountsDataSize?: number }> {
+  const preparation = makePreparation(
+    plan,
+    common,
+    selectBatchLookupTables(lookupTables, plan, common.requiredSigners, common.tipAccount),
+    { transactionCount: 1, ...provisionalQuote },
+    1_400_000,
+    common.preset === "economy" || common.preset === "custom" ? 0 : 1,
+    common.transactionVersion === 1 ? 64 * 1024 * 1024 : undefined,
+  );
+  const transaction = await buildPreparedTransaction(preparation);
+  assertIsTransactionWithinSizeLimit(transaction);
+  const estimate = await estimateComputeUnits(rpcUrl, getBase64EncodedWireTransaction(transaction));
+  if (common.transactionVersion === 1 && estimate.loadedAccountsDataSize === undefined) {
+    throw new Error("RPC simulation did not return loadedAccountsDataSize required by v1");
+  }
+  return estimate;
+}
+
+function selectBatchLookupTables(
+  lookupTables: Record<string, string[]>,
+  plan: TransferPlan,
+  requiredSigners: readonly string[],
+  tipAccount?: string,
+): Record<string, string[]> {
+  return selectUsefulLookupTables(
+    lookupTables,
+    [...wallets(plan), ...(tipAccount ? [tipAccount] : [])]
+      .filter((wallet) => !requiredSigners.includes(wallet)),
+  );
 }
 
 function validateNetwork(value: string): asserts value is Network {
   if (value !== "devnet" && value !== "mainnet") throw new Error("Invalid network");
+}
+
+function validateTransactionVersion(value: unknown): asserts value is 0 | 1 {
+  if (value !== 0 && value !== 1) throw new Error("Transaction version must be 0 or 1");
 }
 
 function wallets(plan: TransferPlan): string[] {
@@ -224,22 +344,29 @@ async function fetchBalances(rpcUrl: string, addresses: string[]): Promise<Recor
   return Object.fromEntries(entries);
 }
 
-async function estimateComputeUnits(rpcUrl: string, wireTransaction: string): Promise<number> {
-  try {
-    const simulation = await rpcCall<SimulationResult>(rpcUrl, "simulateTransaction", [
-      wireTransaction,
-      {
-        encoding: "base64",
-        sigVerify: false,
-        replaceRecentBlockhash: true,
-        commitment: "confirmed",
-      },
-    ]);
-    if (simulation.value.err) throw new Error(JSON.stringify(simulation.value.err));
-    return simulation.value.unitsConsumed ?? 1_000;
-  } catch {
-    return 1_000;
+async function estimateComputeUnits(
+  rpcUrl: string,
+  wireTransaction: string,
+): Promise<{ units: number; loadedAccountsDataSize?: number }> {
+  const simulation = await rpcCall<SimulationResult>(rpcUrl, "simulateTransaction", [
+    wireTransaction,
+    {
+      encoding: "base64",
+      sigVerify: false,
+      replaceRecentBlockhash: true,
+      commitment: "confirmed",
+    },
+  ]);
+  if (simulation.value.err) {
+    const logs = simulation.value.logs?.join("\n") ?? "no program logs";
+    throw new Error(`Transaction candidate simulation failed: ${JSON.stringify(simulation.value.err)}\n${logs}`);
   }
+  return {
+    units: simulation.value.unitsConsumed ?? 1_000,
+    ...(simulation.value.loadedAccountsDataSize === undefined
+      ? {}
+      : { loadedAccountsDataSize: simulation.value.loadedAccountsDataSize }),
+  };
 }
 
 async function fetchPriorityFee(rpcUrl: string, accountKeys: string[]): Promise<number> {
@@ -249,7 +376,11 @@ async function fetchPriorityFee(rpcUrl: string, accountKeys: string[]): Promise<
   return Math.max(0, Math.floor(result.priorityFeeEstimate ?? 0));
 }
 
-function validateBalances(plan: TransferPlan, preparation: Preparation): void {
+function validateTransferBalances(
+  plan: TransferPlan,
+  feePayer: string,
+  balances: Record<string, string>,
+): void {
   const required = new Map<string, bigint>();
   if (plan.type === "share") {
     required.set(plan.senders[0].address, getTransferTotal(plan));
@@ -257,11 +388,38 @@ function validateBalances(plan: TransferPlan, preparation: Preparation): void {
     for (const sender of plan.senders) required.set(sender.address, solToLamports(sender.amountSol));
   }
 
-  const feeTotal = BigInt(preparation.quote.totalFeeLamports);
-  required.set(preparation.feePayer, (required.get(preparation.feePayer) ?? 0n) + feeTotal);
+  required.set(feePayer, required.get(feePayer) ?? 0n);
 
   for (const [wallet, needed] of required) {
-    const available = BigInt(preparation.balances[wallet] ?? "0");
+    const available = BigInt(balances[wallet] ?? "0");
+    if (available < needed) {
+      throw new Error(
+        `Insufficient balance for ${wallet}: requires ${needed} lamports, has ${available}`,
+      );
+    }
+  }
+}
+
+function validateAggregateBalances(
+  plan: TransferPlan,
+  feePayer: string,
+  balances: Record<string, string>,
+  preparations: readonly Preparation[],
+): void {
+  const feeTotal = preparations.reduce(
+    (total, preparation) => total + BigInt(preparation.quote.totalFeeLamports),
+    0n,
+  );
+  const required = new Map<string, bigint>();
+  if (plan.type === "share") {
+    required.set(plan.senders[0].address, getTransferTotal(plan));
+  } else {
+    for (const sender of plan.senders) required.set(sender.address, solToLamports(sender.amountSol));
+  }
+  required.set(feePayer, (required.get(feePayer) ?? 0n) + feeTotal);
+
+  for (const [wallet, needed] of required) {
+    const available = BigInt(balances[wallet] ?? "0");
     if (available < needed) {
       throw new Error(
         `Insufficient balance for ${wallet}: requires ${needed} lamports, has ${available}`,

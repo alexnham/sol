@@ -5,6 +5,8 @@ services:
       dockerfile: Dockerfile
     environment:
       HELIUS_API_KEY: ${HELIUS_API_KEY:?Set HELIUS_API_KEY before starting the container}
+      DISTRIBUTOR_PROGRAM_ID_DEVNET: ${DISTRIBUTOR_PROGRAM_ID_DEVNET:?Set the deployed devnet distributor Program ID}
+      DISTRIBUTOR_PROGRAM_ID_MAINNET: ${DISTRIBUTOR_PROGRAM_ID_MAINNET:-}
       HOST: 0.0.0.0
       PORT: 8787
     ports:

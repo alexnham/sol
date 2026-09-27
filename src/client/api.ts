@@ -4,6 +4,7 @@ import type {
   PluginCatalog,
   Preparation,
   SubmissionResult,
+  TransactionVersion,
 } from "../shared/contracts";
 
 export interface VaultKeyMetadata {
@@ -45,11 +46,12 @@ export function prepareTransfer(
   network: Network,
   preset: DeliveryPreset,
   pluginId: string,
-): Promise<Preparation> {
-  return request("/api/prepare", {
+  transactionVersion: TransactionVersion,
+): Promise<Preparation[]> {
+  return request<{ preparations: Preparation[] }>("/api/prepare", {
     method: "POST",
-    body: JSON.stringify({ plan, network, preset, pluginId }),
-  });
+    body: JSON.stringify({ plan, network, preset, pluginId, transactionVersion }),
+  }).then((result) => result.preparations);
 }
 
 export function fetchPlugins(): Promise<PluginCatalog> {

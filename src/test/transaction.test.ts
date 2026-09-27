@@ -50,6 +50,27 @@ describe("single transaction builder", () => {
     ]);
   });
 
+  it("builds and signs a v1 share message through the existing signer flow", async () => {
+    const payer = await generateKeyPairSigner();
+    const receiver = await generateKeyPairSigner();
+    const preparation: Preparation = {
+      ...sharePreparation(payer.address, [receiver.address]),
+      transactionVersion: 1,
+      distributorProgramId: undefined,
+      loadedAccountsDataSizeLimit: 1_000,
+      addressLookupTables: {},
+    };
+    const transaction = await buildPreparedTransaction(preparation);
+    const signed = await signPreparedTransaction(transaction, [payer.address], {
+      id: "v1-test",
+      getSigner: async () => payer,
+    });
+
+    expect(transaction.messageBytes[0]).toBe(0x81);
+    expect(signed.signatures[payer.address]).toBeDefined();
+    expect(transactionSize(signed)).toBeLessThanOrEqual(4_096);
+  });
+
   it("rejects submission when a required signer cannot be resolved", async () => {
     const first = await generateKeyPairSigner();
     const second = await generateKeyPairSigner();
@@ -101,7 +122,9 @@ function sharePreparation(payer: Address, receivers: Address[]): Preparation {
     preparationId: "test-share-preparation",
     network: "devnet",
     preset: "economy",
+    transactionVersion: 0,
     pluginId: "native-sol-transfer",
+    distributorProgramId: "AddressLookupTab1e1111111111111111111111111",
     normalizedAlias: false,
     normalizedPlan: {
       type: "share",
@@ -138,6 +161,7 @@ function consolidationPreparation(
     preparationId: "test-preparation",
     network: "devnet",
     preset: "economy",
+    transactionVersion: 0,
     pluginId: "native-sol-transfer",
     normalizedAlias: false,
     normalizedPlan: {

@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { economyAdapter } from "@solana-workbench/delivery-economy";
+import {
+  CUSTOM_DISTRIBUTOR_PROGRAM_ID_DEVNET,
+  customAdapter,
+} from "@solana-workbench/delivery-custom";
 import { fastAdapter, FAST_TIP_LAMPORTS } from "@solana-workbench/delivery-fast";
 import { maxAdapter, MAX_TIP_LAMPORTS } from "@solana-workbench/delivery-max";
 import { rpcCall, type DeliveryQuoteContext } from "@solana-workbench/delivery-sdk";
@@ -11,6 +15,7 @@ afterEach(() => {
 const context: DeliveryQuoteContext = {
   network: "mainnet",
   preset: "fast",
+  transactionVersion: 0,
   computeUnitLimit: 100_000,
   recommendedMicroLamports: 2_000_000,
   signerCount: 2,
@@ -37,6 +42,16 @@ describe("delivery workspace packages", () => {
     expect(maxAdapter.supports("mainnet")).toBe(true);
     expect(quote.priorityFeeLamports).toBe("100000");
     expect(quote.senderTipLamports).toBe(MAX_TIP_LAMPORTS.toString());
+  });
+
+  it("provides the devnet custom distributor route", async () => {
+    const quote = await customAdapter.quote({ ...context, preset: "custom" });
+    expect(customAdapter.supports("devnet")).toBe(true);
+    expect(customAdapter.supports("mainnet")).toBe(false);
+    expect(quote.priorityFeeLamports).toBe("0");
+    expect(CUSTOM_DISTRIBUTOR_PROGRAM_ID_DEVNET).toBe(
+      "7wRVHVQwGKkrQ4DA4auS5BtwkCgcQuSwcPtTpzFBu3bf",
+    );
   });
 
   it("retries an HTTP 429 response using Retry-After", async () => {

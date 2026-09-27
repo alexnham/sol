@@ -1,9 +1,9 @@
 export type Network = "devnet" | "mainnet";
-export type DeliveryPreset = "economy" | "fast" | "max";
+export type DeliveryPreset = "economy" | "custom" | "fast" | "max";
 export type DeliverySpeed = "standard" | "fast" | "fastest";
 
 export interface TransactionQuote {
-  transactionCount: 1;
+  transactionCount: number;
   transferLamports: string;
   baseFeeLamports: string;
   priorityFeeLamports: string;
@@ -22,6 +22,7 @@ export interface SubmissionResult {
 export interface DeliveryQuoteContext {
   network: Network;
   preset: DeliveryPreset;
+  transactionVersion: 0 | 1;
   computeUnitLimit: number;
   recommendedMicroLamports: number;
   signerCount: number;

@@ -1,8 +1,9 @@
 # Solana Split and Consolidation Workbench
 
-An internal, localhost-only workbench for building one version-0 Solana transaction that either:
+An internal, localhost-only workbench for building selectable version-0 or version-1 Solana
+transactions that either:
 
-- shares SOL from one sender to many receivers; or
+- shares SOL from one sender to many receivers through a v0 distributor or v1 System transfers; or
 - consolidates SOL from many senders into one receiver using partial signatures over the same immutable message.
 
 The UI never accepts private keys. A caller must inject a `SignerProvider` before signing is enabled.
@@ -14,7 +15,14 @@ npm install
 npm run dev
 ```
 
-The API binds to `127.0.0.1:8787`. Vite normally uses `127.0.0.1:5173` and selects the next free port when needed. Put `HELIUS_API_KEY` in `src/.env`; Vite never receives it.
+The API binds to `127.0.0.1:8787`. Vite normally uses `127.0.0.1:5173` and selects the next free port when needed. Put the RPC key and deployed distributor ID in `src/.env`; Vite never receives them:
+
+```dotenv
+HELIUS_API_KEY=your-key
+# Optional override; delivery-custom defaults to 7wRVHVQwGKkrQ4DA4auS5BtwkCgcQuSwcPtTpzFBu3bf
+DISTRIBUTOR_PROGRAM_ID_DEVNET=your-devnet-program-id
+# DISTRIBUTOR_PROGRAM_ID_MAINNET=your-reviewed-mainnet-program-id
+```
 
 Useful checks:
 
@@ -23,6 +31,11 @@ npm test
 npm run typecheck
 npm run build
 ```
+
+The header selects the transaction format independently from the delivery route. v0 keeps the
+1,232-byte message, Compute Budget instructions, and optional ALT compression. v1 uses the
+4,096-byte format, stores resource limits in transaction config, and includes every address
+directly because v1 does not support ALTs.
 
 ## Generate local keypairs
 
@@ -58,6 +71,7 @@ docker run --rm \
   --name solana-workbench \
   -p 127.0.0.1:8787:8787 \
   -e HELIUS_API_KEY=your-key \
+  -e DISTRIBUTOR_PROGRAM_ID_DEVNET=your-devnet-program-id \
   solana-workbench
 ```
 
@@ -67,6 +81,7 @@ For Compose, export the secret in your shell and start the service:
 
 ```bash
 export HELIUS_API_KEY=your-key
+export DISTRIBUTOR_PROGRAM_ID_DEVNET=your-devnet-program-id
 docker compose up --build
 ```
 
@@ -111,6 +126,31 @@ Consolidation:
 `addressLookupTables` are optional. Amounts are exact decimal strings with at most nine decimal
 places.
 
+### Transaction shape and batching
+
+For a v0 share plan, the built-in `native-sol-transfer` plugin emits one distributor instruction
+per batch. Its writable accounts are the source signer followed by the recipients, with the System
+Program readonly account last. Instruction data contains consecutive little-endian `u64` lamport
+amounts, so recipient addresses appear only in the v0 account list and can be loaded from an ALT.
+
+For v1, the same plugin emits one System Program transfer instruction per recipient. The
+transaction contains no distributor call, ALT lookup, or Compute Budget instruction. Its
+`computeUnitLimit`, `loadedAccountsDataSizeLimit`, and total `priorityFeeLamports` are encoded in
+the v1 transaction config.
+
+The server does not hard-code a recipient count. It binary-searches candidate prefixes, compiles
+the exact selected-format transaction, including the delivery tip and signer slots. v0 includes
+Compute Budget instructions and useful ALTs; v1 includes its resource config and static addresses.
+Each candidate must compile, fit its 1,232- or 4,096-byte limit, and simulate successfully. v1
+simulation must also return loaded-account data usage. Final resource limits add 10%, respect the
+runtime caps, and the final v1 wire transaction is simulated again. Prepared batches are signed
+and submitted in order through the existing RPC or Helius Sender adapter. Each batch is atomic;
+separate batches are separate transactions.
+
+Build and deploy the program using
+`program-examples/basics/transfer-sol-modified/native/README.md`, set the matching Program ID
+environment variable above, restart the server, and use an active ALT containing the recipients.
+
 ### Address lookup tables
 
 To compress recipient addresses into an existing on-chain address lookup table (ALT), add its
@@ -128,9 +168,10 @@ address to the plan:
 }
 ```
 
-The server fetches the tables through the configured Helius RPC, chooses the smallest useful set,
+For v0, the server fetches the tables through the configured Helius RPC, chooses the smallest useful set,
 and returns their ordered contents in the preparation so the browser compiles the identical v0
-message. A table is skipped when it matches fewer than two otherwise-inline accounts because its
+message. For v1, ALT recipient selectors are resolved first, but the resulting addresses are
+included as static account keys rather than lookup references. A table is skipped in v0 when it matches fewer than two otherwise-inline accounts because its
 fixed reference overhead would make the transaction larger.
 
 The ALT can also supply share recipients by zero-based index or inclusive index range:
@@ -154,7 +195,8 @@ The ALT can also supply share recipients by zero-based index or inclusive index 
 `indexes` and `ranges` may be combined. Overlapping positions within one selector are deduplicated,
 then expanded in ascending index order. The server rejects indexes outside the table and duplicate
 wallets across selectors. Referenced tables are automatically added to `addressLookupTables`.
-The expanded transaction must still fit Solana's 64-account and 1,232-byte limits.
+The expanded transaction must still fit the 1,232-byte wire limit and pass selected-cluster
+simulation, including that cluster's loaded-account and instruction-trace limits.
 
 To create a table in the UI:
 
@@ -179,8 +221,8 @@ Creating tables on mainnet requires an extra browser confirmation. A selection l
 must be split across separate table creations.
 
 Each ALT must contain the intended recipients and be active before preparing the transfer. A table
-can store 256 addresses, but a v0 transaction can still reference at most 64 total accounts and
-must still fit in 1,232 bytes. Signers cannot be loaded from an ALT. For native SOL sharing, use one
+can store 256 addresses, while each candidate transaction must still fit in 1,232 bytes and pass
+cluster simulation. Signers cannot be loaded from an ALT. For native SOL sharing, use one
 table containing all recipient addresses when possible; supplying more tables only helps when the
 addresses are already spread across them.
 
@@ -229,22 +271,39 @@ registerTransferPlugin(customTransfer);
 
 Import that registration module from `src/client/main.tsx` and `src/server/index.ts`. It will then appear in the UI transfer-strategy selector. A JSON plan can pin it with `"plugin": "custom-transfer"`.
 
-A `DeliveryAdapter` changes quoting/submission transport. Register one server-side with `registerDeliveryAdapter`; the built-in visible routes remain Economy, Fast, and Sender Max. All adapters and transfer plugins must retain the one-transaction invariant.
+A `DeliveryAdapter` changes quoting/submission transport. Register one server-side with `registerDeliveryAdapter`; the built-in visible routes remain Economy, Fast, and Sender Max. Each prepared batch still contains exactly one transaction.
 
 ## Delivery packages
 
 Each built-in delivery experiment is an independent npm workspace package:
 
 - `packages/delivery-economy` — normal RPC, preflight, no priority fee or tip.
+- `packages/delivery-custom` — the deployed devnet distributor ID, raw instruction builder, and normal-RPC custom route.
 - `packages/delivery-fast` — Helius Sender with `swqos_only=true`, capped priority fee, and Fast tip.
 - `packages/delivery-max` — full Helius Sender path, capped priority fee, and Sender Max tip.
 - `packages/delivery-sdk` — shared adapter contracts, quoting math, RPC transport, and confirmation polling.
+- `packages/transaction-v1` — pure v1 message construction, validation, limits, and resource estimation.
+
+Measure the actual v1 share capacity against the configured RPC without signing or submitting:
+
+```bash
+npm run measure:v1 -- SOURCE_ADDRESS devnet
+```
+
+The source must exist and hold enough SOL for simulation. The command reports the measured
+Economy/Custom, Fast, and Max shapes separately; it does not hard-code a recipient count.
+
+An opt-in signed devnet smoke test accepts a Solana CLI-compatible keypair file:
+
+```bash
+npm run smoke:v1 -- /path/to/devnet-keypair.json
+```
 
 `src/server/delivery.ts` only imports and registers the packages. To experiment with a route, edit its package without changing preparation, signing, or the other delivery routes. Keep its exported adapter ID stable if you want the existing UI selection to continue working.
 
 ## Safety behavior
 
-- Devnet enables Economy only. Fast and Sender Max remain visible but disabled.
+- Devnet enables Economy and Custom. Fast and Sender Max remain visible but disabled.
 - Mainnet always requires a final confirmation screen.
 - Oversized transactions are rejected and are never silently split.
 - Duplicate addresses, self-transfers, invalid addresses, invalid amounts, and insufficient balances are rejected.

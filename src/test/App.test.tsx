@@ -11,6 +11,16 @@ describe("workbench UI", () => {
     expect(screen.getByRole("button", { name: "Prepare live quote" })).toBeEnabled();
   });
 
+  it("switches between v0 and v1 transaction formats", () => {
+    render(<App />);
+    const v0 = screen.getByRole("button", { name: "v0" });
+    const v1 = screen.getByRole("button", { name: "v1" });
+    expect(v0).toHaveClass("active");
+    fireEvent.click(v1);
+    expect(v1).toHaveClass("active");
+    expect(screen.getByText("Larger v1 transactions with direct System transfers.")).toBeInTheDocument();
+  });
+
   it("loads valid share and consolidation demo templates", () => {
     render(<App />);
     const picker = screen.getByLabelText("Demo template");

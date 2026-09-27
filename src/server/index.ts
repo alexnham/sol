@@ -11,9 +11,10 @@ import {
   fetchAddressesForLookupTables,
   getTransactionDecoder,
 } from "@solana/kit";
+import { CUSTOM_DISTRIBUTOR_PROGRAM_ID_DEVNET } from "@solana-workbench/delivery-custom";
 import type { PrepareRequest, SubmitRequest } from "../shared/contracts";
 import { deliveryAdapters, transferPlugins } from "../shared/plugin-registry";
-import { prepareTransaction, type StoredPreparation } from "./prepare";
+import { prepareTransactions, type StoredPreparation } from "./prepare";
 import { rpcCall } from "./rpc";
 import { generateVaultKeys, getVaultSigner, listVaultKeys, signWithVaultKey } from "./key-vault";
 import { createAddressLookupTable } from "./create-address-lookup-table";
@@ -175,10 +176,10 @@ app.post("/api/prepare", async (request: Request, response: Response, next: Next
   try {
     const body = request.body as PrepareRequest;
     const rpcUrl = getRpcUrl(body.network);
-    const stored = await prepareTransaction(body, rpcUrl);
-    preparations.set(stored.preparation.preparationId, stored);
+    const stored = await prepareTransactions(body, rpcUrl, getDistributorProgramId(body.network));
+    for (const item of stored) preparations.set(item.preparation.preparationId, item);
     prunePreparations();
-    response.json(stored.preparation);
+    response.json({ preparations: stored.map(({ preparation }) => preparation) });
   } catch (error) {
     next(error);
   }
@@ -239,6 +240,14 @@ function getRpcUrl(network: string): string {
   const host = network === "devnet" ? "devnet" : network === "mainnet" ? "mainnet" : null;
   if (!host) throw new Error("Network must be devnet or mainnet");
   return `https://${host}.helius-rpc.com/?api-key=${encodeURIComponent(apiKey)}`;
+}
+
+function getDistributorProgramId(network: string): string | undefined {
+  return network === "devnet"
+    ? process.env.DISTRIBUTOR_PROGRAM_ID_DEVNET ?? CUSTOM_DISTRIBUTOR_PROGRAM_ID_DEVNET
+    : network === "mainnet"
+      ? process.env.DISTRIBUTOR_PROGRAM_ID_MAINNET
+      : undefined;
 }
 
 function prunePreparations(): void {

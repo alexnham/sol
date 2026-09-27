@@ -1,12 +1,10 @@
 {
-  "name": "@solana-workbench/delivery-custom",
+  "name": "@solana-workbench/transaction-v1",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "@solana-program/system": "^0.15.0",
-    "@solana-workbench/delivery-sdk": "*",
     "@solana/kit": "^8.3.0"
   }
 }

@@ -6,6 +6,7 @@ import type {
   TransferPlugin,
   ValidationResult,
 } from "./contracts";
+import { getDistributeSolInstruction } from "@solana-workbench/delivery-custom";
 import { solToLamports } from "./schema";
 
 class Registry<T extends { id: string }> {
@@ -44,7 +45,17 @@ export const nativeSolTransferPlugin: TransferPlugin = {
     ];
     return [...new Set(values)].map((value) => address(value));
   },
-  buildInstructions: async ({ plan, feePayer, tipAccount, tipLamports }) => {
+  buildInstructions: async ({
+    plan,
+    transactionVersion,
+    feePayer,
+    distributorProgramId,
+    tipAccount,
+    tipLamports,
+  }) => {
+    if (transactionVersion === 0 && plan.type === "share" && !distributorProgramId) {
+      throw new Error("A distributor Program ID is required for share transfers");
+    }
     const transfers =
       plan.type === "share"
         ? plan.receivers.map((receiver) => ({
@@ -58,13 +69,20 @@ export const nativeSolTransferPlugin: TransferPlugin = {
             amount: sender.amountSol,
           }));
 
-    const instructions = transfers.map((transfer) =>
-      getTransferSolInstruction({
-        source: createNoopSigner(address(transfer.source)),
-        destination: address(transfer.destination),
-        amount: lamports(solToLamports(transfer.amount)),
-      }),
-    );
+    const instructions = transactionVersion === 0 && plan.type === "share"
+      ? [getDistributeSolInstruction(
+          createNoopSigner(address(plan.senders[0].address)),
+          plan.receivers.map((receiver) => address(receiver.address)),
+          plan.receivers.map((receiver) => solToLamports(receiver.amountSol)),
+          distributorProgramId!,
+        )]
+      : transfers.map((transfer) =>
+          getTransferSolInstruction({
+            source: createNoopSigner(address(transfer.source)),
+            destination: address(transfer.destination),
+            amount: lamports(solToLamports(transfer.amount)),
+          }),
+        );
 
     if (tipAccount && tipLamports > 0n) {
       instructions.push(

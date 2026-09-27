@@ -5,6 +5,7 @@ import type {
   Preparation,
   SubmissionResult,
   TransactionQuote,
+  TransactionVersion,
   TransferPlan,
   PluginCatalog,
   LookupTableSharePlanInput,
@@ -105,6 +106,13 @@ const PRESETS: Array<{
     tip: "No Sender tip",
   },
   {
+    id: "custom",
+    name: "Custom",
+    speed: "Standard",
+    tip: "No Sender tip",
+    description: "Custom normal-RPC route",
+  },
+  {
     id: "fast",
     name: "Fast",
     description: "Helius SWQOS route",
@@ -132,7 +140,8 @@ export default function App() {
   const [json, setJson] = useState(SHARE_SAMPLE);
   const [network, setNetwork] = useState<Network>("devnet");
   const [preset, setPreset] = useState<DeliveryPreset>("economy");
-  const [preparation, setPreparation] = useState<Preparation | null>(null);
+  const [transactionVersion, setTransactionVersion] = useState<TransactionVersion>(0);
+  const [preparations, setPreparations] = useState<Preparation[]>([]);
   const [result, setResult] = useState<SubmissionResult | null>(null);
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -149,7 +158,8 @@ export default function App() {
   const [editorExpandedOverride, setEditorExpandedOverride] = useState<boolean | null>(null);
 
   const parsed = useMemo(() => parseEditor(json), [json]);
-  const plan = preparation?.normalizedPlan ?? parsed.plan;
+  const preparation = preparations[0] ?? null;
+  const plan = parsed.plan ?? preparation?.normalizedPlan ?? null;
   const jsonLineCount = json.split("\n").length;
   const jsonIsLarge = jsonLineCount > 40 || json.length > 4_000;
   const editorExpanded = editorExpandedOverride ?? !jsonIsLarge;
@@ -253,7 +263,7 @@ export default function App() {
 
   function invalidate(nextJson?: string) {
     if (nextJson !== undefined) setJson(nextJson);
-    setPreparation(null);
+    setPreparations([]);
     setResult(null);
     setError(null);
     setStage("idle");
@@ -262,7 +272,8 @@ export default function App() {
 
   function changeNetwork(value: Network) {
     setNetwork(value);
-    if (value === "devnet" && preset !== "economy") setPreset("economy");
+    if (value === "devnet" && preset !== "economy" && preset !== "custom") setPreset("economy");
+    if (value === "mainnet" && preset === "custom") setPreset("economy");
     invalidate();
   }
 
@@ -277,10 +288,14 @@ export default function App() {
         network,
         preset,
         parsed.plan?.plugin ?? parsed.lookupPlan?.plugin ?? pluginId,
+        transactionVersion,
       );
-      setPreparation(next);
+      setPreparations(next);
       setSignerStatuses(
-        Object.fromEntries(next.requiredSigners.map((signer) => [signer, "waiting"])),
+        Object.fromEntries(
+          [...new Set(next.flatMap((item) => item.requiredSigners))]
+            .map((signer) => [signer, "waiting"]),
+        ),
       );
       setStage("ready");
     } catch (reason) {
@@ -289,7 +304,7 @@ export default function App() {
   }
 
   async function requestSend() {
-    if (!preparation) return;
+    if (preparations.length === 0) return;
     if (network === "mainnet") {
       setShowReview(true);
       return;
@@ -298,25 +313,14 @@ export default function App() {
   }
 
   async function signAndSend() {
-    if (!preparation) return;
+    if (preparations.length === 0) return;
     setShowReview(false);
     const managedAddresses = new Set(vaultKeys.map((keypair) => keypair.address));
-    const canUseVault = preparation.requiredSigners.every((signer) => managedAddresses.has(signer));
+    const requiredSigners = [...new Set(preparations.flatMap((item) => item.requiredSigners))];
+    const canUseVault = requiredSigners.every((signer) => managedAddresses.has(signer));
     const externalProvider = getSignerProvider();
-    const vaultProvider = createVaultSignerProvider(preparation.preparationId);
-    const provider = externalProvider
-      ? {
-          id: "managed-and-external-signers",
-          getSigner: (signerAddress: Parameters<typeof externalProvider.getSigner>[0]) =>
-            managedAddresses.has(String(signerAddress))
-              ? vaultProvider.getSigner(signerAddress)
-              : externalProvider.getSigner(signerAddress),
-        }
-      : canUseVault
-        ? vaultProvider
-        : null;
-    if (!provider) {
-      const missing = preparation.requiredSigners.filter((signer) => !managedAddresses.has(signer));
+    if (!externalProvider && !canUseVault) {
+      const missing = requiredSigners.filter((signer) => !managedAddresses.has(signer));
       setError(
         missing.length > 0
           ? `Missing signer access for ${missing.map(shortAddress).join(", ")}. Add those keys in Keygen or attach a signer provider.`
@@ -328,22 +332,33 @@ export default function App() {
     try {
       setStage("signing");
       setSignerStatuses(
-        Object.fromEntries(preparation.requiredSigners.map((signer) => [signer, "waiting"])),
+        Object.fromEntries(requiredSigners.map((signer) => [signer, "waiting"])),
       );
-      const transaction = await buildPreparedTransaction(preparation);
-      const signed = await signPreparedTransaction(
-        transaction,
-        preparation.requiredSigners,
-        provider,
-        (signerAddress, status) => {
-          setSignerStatuses((current) => ({ ...current, [signerAddress]: status }));
-        },
-      );
-      setStage("submitting");
-      const submission = await submitTransfer(
-        preparation.preparationId,
-        encodeSignedTransaction(signed),
-      );
+      let submission: SubmissionResult | null = null;
+      for (const item of preparations) {
+        const vaultProvider = createVaultSignerProvider(item.preparationId);
+        const provider = externalProvider
+          ? {
+              id: "managed-and-external-signers",
+              getSigner: (signerAddress: Parameters<typeof externalProvider.getSigner>[0]) =>
+                managedAddresses.has(String(signerAddress))
+                  ? vaultProvider.getSigner(signerAddress)
+                  : externalProvider.getSigner(signerAddress),
+            }
+          : vaultProvider;
+        const transaction = await buildPreparedTransaction(item);
+        const signed = await signPreparedTransaction(
+          transaction,
+          item.requiredSigners,
+          provider,
+          (signerAddress, status) => {
+            setSignerStatuses((current) => ({ ...current, [signerAddress]: status }));
+          },
+        );
+        setStage("submitting");
+        submission = await submitTransfer(item.preparationId, encodeSignedTransaction(signed));
+        setStage("signing");
+      }
       setResult(submission);
       setStage("confirmed");
     } catch (reason) {
@@ -363,7 +378,9 @@ export default function App() {
           <span className="mark" aria-hidden="true"><i /><i /><i /></span>
           <div>
             <h1>Transfer workbench</h1>
-            <p>One message. Every wallet. One on-chain transaction.</p>
+            <p>{transactionVersion === 0
+              ? "ALT-compressed distributor transactions."
+              : "Larger v1 transactions with direct System transfers."}</p>
           </div>
         </div>
         <div className="topbar-controls">
@@ -382,6 +399,21 @@ export default function App() {
               <span className="network-dot" />{value}
             </button>
           ))}
+          </div>
+          <div className="network-switch" aria-label="Transaction version">
+            {([0, 1] as TransactionVersion[]).map((value) => (
+              <button
+                key={value}
+                className={transactionVersion === value ? "active" : ""}
+                onClick={() => {
+                  setTransactionVersion(value);
+                  invalidate();
+                }}
+                type="button"
+              >
+                v{value}
+              </button>
+            ))}
           </div>
         </div>
       </header>
@@ -503,7 +535,7 @@ export default function App() {
               <h2>{plan?.type === "consolidation" ? "Consolidation flow" : "Share flow"}</h2>
               <p>{flowDescription(plan)}</p>
             </div>
-            <span className="one-tx"><strong>1</strong> transaction</span>
+            <span className="one-tx"><strong>{preparation?.quote.transactionCount ?? 1}</strong> transaction{preparation?.quote.transactionCount === 1 ? "" : "s"}</span>
           </div>
 
           <WalletRail plan={plan} lookupPlan={preparation ? null : parsed.lookupPlan} />
@@ -515,7 +547,9 @@ export default function App() {
             </div>
             <div className="routes">
               {PRESETS.map((item) => {
-                const disabled = network === "devnet" && item.id !== "economy";
+                const disabled = network === "devnet"
+                  ? item.id !== "economy" && item.id !== "custom"
+                  : item.id === "custom";
                 return (
                   <button
                     key={item.id}
@@ -534,14 +568,14 @@ export default function App() {
                       <small>{disabled ? "Mainnet only" : item.description}</small>
                     </span>
                     <span className="route-data"><strong>{item.speed}</strong><small>{item.tip}</small></span>
-                    <span className="route-count">1 tx</span>
+                    <span className="route-count">dynamic</span>
                   </button>
                 );
               })}
             </div>
           </div>
 
-          <QuotePanel preparation={preparation} />
+          <QuotePanel preparations={preparations} />
 
           {preparation && (
             <SignerProgress
@@ -595,8 +629,8 @@ export default function App() {
           <section className="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title" onMouseDown={(event) => event.stopPropagation()}>
             <span className="mainnet-badge">Mainnet transfer</span>
             <h2 id="confirm-title">Review real-fund submission</h2>
-            <p>This action requests {preparation.requiredSigners.length} signature{preparation.requiredSigners.length === 1 ? "" : "s"} and submits one irreversible transaction.</p>
-            <QuoteRows quote={preparation.quote} />
+            <p>This action requests {preparation.requiredSigners.length} signature{preparation.requiredSigners.length === 1 ? "" : "s"} per batch and submits {preparations.length} irreversible transaction{preparations.length === 1 ? "" : "s"}.</p>
+            <QuoteRows quote={aggregateQuote(preparations)} />
             <div className="modal-actions">
               <button className="secondary" onClick={() => setShowReview(false)} type="button">Cancel</button>
               <button className="danger" onClick={signAndSend} type="button">Sign mainnet transaction</button>
@@ -1022,19 +1056,23 @@ function secureRandomIndex(maxExclusive: number): number {
   return random[0]! % maxExclusive;
 }
 
-function QuotePanel({ preparation }: { preparation: Preparation | null }) {
+function QuotePanel({ preparations }: { preparations: Preparation[] }) {
+  const preparation = preparations[0] ?? null;
+  const quote = preparation ? aggregateQuote(preparations) : null;
+  const largestSize = Math.max(...preparations.map((item) => item.transactionSizeBytes), 0);
+  const sizeLimit = preparation?.transactionVersion === 1 ? 4_096 : 1_232;
   return (
     <div className={`quote-panel ${preparation ? "quoted" : ""}`}>
       <div className="section-title"><h3>Transaction data</h3><span>{preparation ? "Live estimate" : "Awaiting quote"}</span></div>
       {preparation ? (
         <>
-          <QuoteRows quote={preparation.quote} />
+          <QuoteRows quote={quote!} />
           <div className="quote-meta">
             <span><strong>{preparation.requiredSigners.length}</strong> signer{preparation.requiredSigners.length === 1 ? "" : "s"}</span>
-            <span><strong>{preparation.computeUnitLimit.toLocaleString()}</strong> CU limit</span>
+            <span><strong>{preparations.reduce((sum, item) => sum + item.computeUnitLimit, 0).toLocaleString()}</strong> total CU limit</span>
             <span><strong>{Object.keys(preparation.addressLookupTables ?? {}).length}</strong> ALT{Object.keys(preparation.addressLookupTables ?? {}).length === 1 ? "" : "s"}</span>
-            <span title={`${1_232 - preparation.transactionSizeBytes} bytes remaining`}>
-              <strong>{preparation.transactionSizeBytes.toLocaleString()} / 1,232</strong> bytes
+            <span title={`${sizeLimit - largestSize} bytes remaining in the largest batch`}>
+              <strong>{largestSize.toLocaleString()} / {sizeLimit.toLocaleString()}</strong> max bytes
             </span>
           </div>
         </>
@@ -1045,6 +1083,22 @@ function QuotePanel({ preparation }: { preparation: Preparation | null }) {
       )}
     </div>
   );
+}
+
+function aggregateQuote(preparations: readonly Preparation[]): TransactionQuote {
+  const first = preparations[0];
+  if (!first) throw new Error("No prepared transaction quote is available");
+  const sum = (field: "transferLamports" | "baseFeeLamports" | "priorityFeeLamports" | "senderTipLamports" | "totalFeeLamports") =>
+    preparations.reduce((total, item) => total + BigInt(item.quote[field]), 0n).toString();
+  return {
+    transactionCount: preparations.length,
+    transferLamports: sum("transferLamports"),
+    baseFeeLamports: sum("baseFeeLamports"),
+    priorityFeeLamports: sum("priorityFeeLamports"),
+    senderTipLamports: sum("senderTipLamports"),
+    totalFeeLamports: sum("totalFeeLamports"),
+    speed: first.quote.speed,
+  };
 }
 
 function SignerProgress({
@@ -1133,7 +1187,7 @@ function stageLabel(stage: Stage): string {
     preparing: "Fetching balances and fees",
     ready: "Prepared and ready to sign",
     signing: "Collecting partial signatures",
-    submitting: "Submitting one transaction",
+    submitting: "Submitting transaction batch",
     confirmed: "On-chain confirmation received",
     failed: "Review the issue above",
   };
