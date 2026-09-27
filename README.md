@@ -61,6 +61,48 @@ The UI also includes a **Keygen** tab. It lists public metadata from compatible 
 
 Private-key bytes never enter the browser. Managed signing happens through the localhost API, which signs only a transaction whose message exactly matches an active server-side preparation and only for an address that preparation requires. External `SignerProvider` adapters can still supply any signers not present in the local vault.
 
+## Create and track SPL tokens
+
+The **Minting** tab creates either classic SPL Token mints or Token-2022 mints with a managed wallet
+as the fee payer and mint authority. Choose a name and symbol, 0–9 decimals, an optional initial
+supply, and an optional managed freeze authority. Classic-token names and symbols stay in the local
+registry. Token-2022 mints use metadata-pointer and token-metadata extensions to store the name,
+symbol, metadata URI, and optional `image` field on the mint. For broad wallet compatibility, the
+metadata URI should resolve to standard JSON whose `image` property points to an HTTP, HTTPS, or
+IPFS-hosted image; the workbench does not upload or host image files.
+
+Creation is one atomic transaction: create and initialize the mint, optionally create the mint
+authority's associated token account and mint the initial supply, then apply any requested mint or
+freeze authority revocations. The mint keypair exists only while the server builds and signs this
+transaction. Its secret key is never stored. v0 uses a Compute Budget instruction and the 1,232-byte
+limit; v1 stores resource limits in transaction config and uses its 4,096-byte limit. Mint creation
+uses normal RPC submission with preflight and does not apply delivery-route tips.
+
+Created public metadata is stored atomically in `generated-keys/token-mints.json`. Refreshing the
+tab batch-fetches current mint accounts and shows live supply and authority state. A failed RPC
+refresh does not remove registry entries. Mainnet creation always requires an explicit browser
+confirmation and matching server acknowledgement.
+
+Every tracked token has a **Manage token** panel. It supports editing local labels, updating
+Token-2022 metadata, minting additional supply, transferring or burning tokens from a managed
+owner's associated token account, rotating or permanently revoking mint/freeze/metadata
+authorities, and freezing or thawing an owner's associated token account. Destination ATAs are
+created idempotently. Each on-chain action is simulated, rebuilt with measured resource limits,
+signed by the applicable managed authority, sent with preflight, and confirmed before the UI is
+updated. Metadata updates top up rent before growing the Token-2022 mint account. Token decimals
+are immutable after mint initialization and therefore are not editable.
+
+An opt-in devnet smoke test creates and records a real token using an existing managed wallet:
+
+```bash
+RUN_DEVNET_SMOKE=1 \
+SMOKE_TOKEN_MINT_AUTHORITY=YOUR_MANAGED_ADDRESS \
+npm run smoke:token-mint
+```
+
+The selected wallet must exist in Keygen, have devnet SOL, and `HELIUS_API_KEY` must be configured
+in `src/.env`.
+
 ## Run with Docker
 
 The production container builds the Vite client and serves both the UI and API from port `8787`. Secrets are supplied only at runtime and are excluded from the image build context.

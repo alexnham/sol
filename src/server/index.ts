@@ -19,6 +19,8 @@ import { rpcCall } from "./rpc";
 import { generateVaultKeys, getVaultSigner, listVaultKeys, signWithVaultKey } from "./key-vault";
 import { createAddressLookupTable } from "./create-address-lookup-table";
 import { listStoredAddressLookupTables, recordAddressLookupTable } from "./alt-registry";
+import { createTokenMint, listTokenMints, manageTokenMint, validateTokenMintRequest } from "./token-mints";
+import type { CreateTokenMintRequest, ManageTokenMintRequest } from "../shared/token-mints";
 
 const directory = fileURLToPath(new URL(".", import.meta.url));
 dotenv.config({ path: resolve(directory, "../.env") });
@@ -98,6 +100,49 @@ app.post("/api/keypairs/generate", async (request, response, next) => {
   try {
     const count = Number((request.body as { count?: unknown }).count);
     response.status(201).json({ keypairs: await generateVaultKeys(count) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/token-mints", async (request, response, next) => {
+  try {
+    const network = request.query.network;
+    if (network !== "devnet" && network !== "mainnet") throw new Error("Network must be devnet or mainnet");
+    response.json({ tokenMints: await listTokenMints(getRpcUrl(network), network) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/token-mints", async (request, response, next) => {
+  try {
+    const body = request.body as CreateTokenMintRequest;
+    const input = validateTokenMintRequest(body);
+    const mintAuthority = await getVaultSigner(input.mintAuthority);
+    const freezeAuthority = input.freezeAuthority === null
+      ? null
+      : input.freezeAuthority === input.mintAuthority
+        ? mintAuthority
+        : await getVaultSigner(input.freezeAuthority!);
+    response.status(201).json(await createTokenMint(
+      getRpcUrl(input.network),
+      body,
+      mintAuthority,
+      freezeAuthority,
+    ));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/token-mints/manage", async (request, response, next) => {
+  try {
+    response.json(await manageTokenMint(
+      getRpcUrl((request.body as ManageTokenMintRequest).network),
+      request.body as ManageTokenMintRequest,
+      getVaultSigner,
+    ));
   } catch (error) {
     next(error);
   }

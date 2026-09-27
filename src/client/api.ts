@@ -6,6 +6,7 @@ import type {
   SubmissionResult,
   TransactionVersion,
 } from "../shared/contracts";
+import type { CreateTokenMintRequest, ManageTokenMintRequest, TokenMintActionResult, TrackedTokenMint } from "../shared/token-mints";
 
 export interface VaultKeyMetadata {
   address: string;
@@ -32,6 +33,7 @@ export interface StoredAddressLookupTable {
 }
 
 async function request<T>(path: string, init: RequestInit): Promise<T> {
+  console.log("test: ", path)
   const response = await fetch(path, {
     ...init,
     headers: { "Content-Type": "application/json", ...init.headers },
@@ -118,5 +120,27 @@ export function requestVaultSignature(
   return request("/api/keypairs/sign", {
     method: "POST",
     body: JSON.stringify({ preparationId, address: signerAddress, transaction }),
+  });
+}
+
+export function createTokenMint(input: CreateTokenMintRequest): Promise<TrackedTokenMint> {
+  return request("/api/token-mints", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function fetchTokenMints(network: Network): Promise<TrackedTokenMint[]> {
+  const result = await request<{ tokenMints: TrackedTokenMint[] }>(
+    `/api/token-mints?network=${encodeURIComponent(network)}`,
+    { method: "GET" },
+  );
+  return result.tokenMints;
+}
+
+export function manageTokenMint(input: ManageTokenMintRequest): Promise<TokenMintActionResult> {
+  return request("/api/token-mints/manage", {
+    method: "POST",
+    body: JSON.stringify(input),
   });
 }

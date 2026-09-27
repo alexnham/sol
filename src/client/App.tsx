@@ -32,6 +32,8 @@ import {
 } from "./api";
 import { getSignerProvider } from "./signer-provider";
 import { createVaultSignerProvider } from "./vault-signer";
+import { MintingTab } from "./MintingTab";
+import { GuideTab } from "./GuideTab";
 
 const SHARE_SAMPLE = `{
   "type": "share",
@@ -130,7 +132,7 @@ const PRESETS: Array<{
 
 type Stage = "idle" | "preparing" | "ready" | "signing" | "submitting" | "confirmed" | "failed";
 type SignerUiStatus = "waiting" | "signing" | "signed" | "failed";
-type AppTab = "workbench" | "keygen";
+type AppTab = "workbench" | "keygen" | "minting" | "guide";
 
 const FALLBACK_SOURCE = "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE";
 const FALLBACK_DESTINATION = "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ";
@@ -377,8 +379,8 @@ export default function App() {
         <div className="identity">
           <span className="mark" aria-hidden="true"><i /><i /><i /></span>
           <div>
-            <h1>Transfer workbench</h1>
-            <p>{transactionVersion === 0
+            <h1>Solana workbench</h1>
+            <p>{activeTab === "guide" ? "Practical recipes for tokens, keys, and transactions." : activeTab === "minting" ? "Create and track classic SPL Token mints." : transactionVersion === 0
               ? "ALT-compressed distributor transactions."
               : "Larger v1 transactions with direct System transfers."}</p>
           </div>
@@ -387,6 +389,8 @@ export default function App() {
           <nav className="app-tabs" aria-label="Workbench sections">
             <button type="button" className={activeTab === "workbench" ? "active" : ""} onClick={() => setActiveTab("workbench")}>Workbench</button>
             <button type="button" className={activeTab === "keygen" ? "active" : ""} onClick={() => setActiveTab("keygen")}>Keygen <span>{vaultKeys.length}</span></button>
+            <button type="button" className={activeTab === "minting" ? "active" : ""} onClick={() => setActiveTab("minting")}>Minting</button>
+            <button type="button" className={activeTab === "guide" ? "active" : ""} onClick={() => setActiveTab("guide")}>Tokens</button>
           </nav>
           <div className="network-switch" aria-label="Solana network">
           {(["devnet", "mainnet"] as Network[]).map((value) => (
@@ -610,7 +614,7 @@ export default function App() {
           </div>
         </section>
       </section>
-      ) : (
+      ) : activeTab === "keygen" ? (
         <KeygenPanel
           keypairs={vaultKeys}
           lookupTables={vaultLookupTables}
@@ -622,6 +626,14 @@ export default function App() {
           onUse={useVaultKeys}
           onUseLookupTable={useLookupTable}
         />
+      ) : activeTab === "minting" ? (
+        <MintingTab
+          network={network}
+          transactionVersion={transactionVersion}
+          keypairs={vaultKeys}
+        />
+      ) : (
+        <GuideTab onNavigate={setActiveTab} />
       )}
 
       {showReview && preparation && (

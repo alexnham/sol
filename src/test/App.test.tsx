@@ -123,6 +123,75 @@ describe("workbench UI", () => {
     expect(screen.queryByLabelText(/private|secret/i)).not.toBeInTheDocument();
   });
 
+  it("opens the Minting tab and requires confirmation before a mainnet mint", async () => {
+    const authority = "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ";
+    const requests: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      requests.push(path);
+      const body = path.endsWith("/api/keypairs")
+        ? { keypairs: [{ address: authority, file: "wallets.txt", createdAt: "2026-09-27T00:00:00.000Z" }] }
+        : path.startsWith("/api/token-mints?")
+          ? { tokenMints: [] }
+          : path.endsWith("/api/address-lookup-tables")
+            ? { addressLookupTables: [] }
+            : { transfer: [{ id: "native-sol-transfer", label: "Native SOL transfer" }], delivery: [] };
+      return { ok: true, json: async () => body } as Response;
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Minting" }));
+    expect(screen.getByRole("heading", { name: "Create and track token mints" })).toBeInTheDocument();
+    await screen.findByRole("option", { name: authority });
+    fireEvent.click(screen.getByRole("button", { name: "mainnet" }));
+    fireEvent.change(screen.getByLabelText("Local name"), { target: { value: "Test Token" } });
+    fireEvent.change(screen.getByLabelText("Local symbol"), { target: { value: "TEST" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create SPL token on mainnet" }));
+
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(requests.filter((path) => path === "/api/token-mints")).toHaveLength(0);
+  });
+
+  it("shows Token-2022 metadata and token management actions", async () => {
+    const authority = "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ";
+    const mint = "Cas5qTBtAr6kPFt1LRW431JkYzqXm2Z49XMD5xAa3wuQ";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      const body = path.endsWith("/api/keypairs")
+        ? { keypairs: [{ address: authority, file: "wallets.txt", createdAt: "2026-09-27T00:00:00.000Z" }] }
+        : path.startsWith("/api/token-mints?")
+          ? { tokenMints: [{ mint, name: "Chain Token", symbol: "CHAIN", decimals: 6, initialSupplyBaseUnits: "1000000", supplyBaseUnits: "1000000", network: "devnet", transactionVersion: 1, mintAuthorityAtCreation: authority, freezeAuthorityAtCreation: authority, mintAuthorityRevoked: false, freezeAuthorityRevoked: false, creationSignature: "sig", createdAt: "2026-09-27T00:00:00.000Z", tokenProgram: "token2022", metadataUri: "https://example.com/token.json", imageUrl: "https://example.com/token.png", liveStatus: "available", mintAuthority: authority, freezeAuthority: authority, metadataUpdateAuthority: authority }] }
+          : path.endsWith("/api/address-lookup-tables")
+            ? { addressLookupTables: [] }
+            : { transfer: [{ id: "native-sol-transfer", label: "Native SOL transfer" }], delivery: [] };
+      return { ok: true, json: async () => body } as Response;
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Minting" }));
+    expect(await screen.findByText("Chain Token")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Manage token" }));
+    const actions = screen.getByLabelText("Manage CHAIN");
+    expect(actions).toHaveTextContent("Update on-chain metadata");
+    expect(actions).toHaveTextContent("Mint additional supply");
+    expect(actions).toHaveTextContent("Transfer tokens");
+    expect(actions).toHaveTextContent("Burn tokens");
+    expect(actions).toHaveTextContent("Freeze owner ATA");
+    expect(actions).toHaveTextContent("Change/revoke metadata authority");
+  });
+
+  it("presents CLI how-to recipes and links back to the visual tools", () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Tokens" }));
+
+    expect(screen.getByRole("heading", { name: "How to work with tokens from the command line." })).toBeInTheDocument();
+    expect(screen.getByText(/spl-token --program-2022 initialize-metadata/)).toBeInTheDocument();
+    expect(screen.getByText(/npm run measure:v1/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Workbench" }));
+    expect(screen.getByRole("heading", { name: "Transfer JSON" })).toBeInTheDocument();
+  });
+
   it("shows saved ALTs in a section separate from managed wallets", async () => {
     const tableAddress = "Cas5qTBtAr6kPFt1LRW431JkYzqXm2Z49XMD5xAa3wuQ";
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
