@@ -10,7 +10,7 @@ import type {
   PluginCatalog,
   LookupTableSharePlanInput,
 } from "../shared/contracts";
-import { lamportsToSol, parseTransferPlanInput, PlanValidationError } from "../shared/schema";
+import { getTransferTotal, lamportsToSol, parseTransferPlanInput, PlanValidationError } from "../shared/schema";
 import {
   buildPreparedTransaction,
   encodeSignedTransaction,
@@ -34,11 +34,12 @@ import { getSignerProvider } from "./signer-provider";
 import { createVaultSignerProvider } from "./vault-signer";
 import { MintingTab } from "./MintingTab";
 import { GuideTab } from "./GuideTab";
+import { LiquidityTab } from "./LiquidityTab";
 
 const SHARE_SAMPLE = `{
   "type": "share",
   "senders": [
-    { "address": "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE" }
+    { "address": "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ" }
   ],
   "receivers": [
     { "address": "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ", "amountSol": "0.001" },
@@ -50,7 +51,7 @@ const SHARE_SAMPLE = `{
 const CONSOLIDATION_SAMPLE = `{
   "type": "consolidation",
   "senders": [
-    { "address": "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE", "amountSol": "0.001" },
+    { "address": "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ", "amountSol": "0.001" },
     { "address": "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ", "amountSol": "0.001" }
   ],
   "receivers": [
@@ -132,19 +133,20 @@ const PRESETS: Array<{
 
 type Stage = "idle" | "preparing" | "ready" | "signing" | "submitting" | "confirmed" | "failed";
 type SignerUiStatus = "waiting" | "signing" | "signed" | "failed";
-type AppTab = "workbench" | "keygen" | "minting" | "guide";
+type AppTab = "workbench" | "keygen" | "minting" | "liquidity" | "guide";
 
 const FALLBACK_SOURCE = "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE";
 const FALLBACK_DESTINATION = "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ";
+const KEYGEN_PAGE_SIZE = 25;
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<AppTab>("workbench");
   const [json, setJson] = useState(SHARE_SAMPLE);
   const [network, setNetwork] = useState<Network>("devnet");
   const [preset, setPreset] = useState<DeliveryPreset>("economy");
-  const [transactionVersion, setTransactionVersion] = useState<TransactionVersion>(0);
+  const [transactionVersion, setTransactionVersion] = useState<TransactionVersion>(1);
   const [preparations, setPreparations] = useState<Preparation[]>([]);
-  const [result, setResult] = useState<SubmissionResult | null>(null);
+  const [results, setResults] = useState<SubmissionResult[]>([]);
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
   const [showReview, setShowReview] = useState(false);
@@ -225,7 +227,7 @@ export default function App() {
       )?.address ?? FALLBACK_DESTINATION;
       nextPlan = {
         type: "consolidation",
-        senders: selected.map((walletAddress) => ({ address: walletAddress, amountSol: "0.01" })),
+        senders: selected.map((walletAddress) => ({ address: walletAddress, amountSol: "0.001" })),
         receivers: [{ address: currentDestination }],
       };
     } else if (role === "sources") {
@@ -237,7 +239,7 @@ export default function App() {
         senders: [{ address: selected[0]! }],
         receivers: receivers.length > 0
           ? receivers
-          : [{ address: FALLBACK_DESTINATION, amountSol: "0.01" }],
+          : [{ address: FALLBACK_DESTINATION, amountSol: "0.001" }],
       };
     } else {
       const currentSource = plan?.senders.find(
@@ -246,7 +248,7 @@ export default function App() {
       nextPlan = {
         type: "share",
         senders: [{ address: currentSource }],
-        receivers: selected.map((walletAddress) => ({ address: walletAddress, amountSol: "0.01" })),
+        receivers: selected.map((walletAddress) => ({ address: walletAddress, amountSol: "0.001" })),
       };
     }
     invalidate(JSON.stringify(nextPlan, null, 2));
@@ -263,10 +265,15 @@ export default function App() {
     setActiveTab("workbench");
   }
 
+  function flipTransferDirection() {
+    if (!plan) return;
+    invalidate(JSON.stringify(flipTransferPlan(plan), null, 2));
+  }
+
   function invalidate(nextJson?: string) {
     if (nextJson !== undefined) setJson(nextJson);
     setPreparations([]);
-    setResult(null);
+    setResults([]);
     setError(null);
     setStage("idle");
     setSignerStatuses({});
@@ -279,11 +286,11 @@ export default function App() {
     invalidate();
   }
 
-  async function prepare() {
-    if (!parsed.raw) return;
+  async function prepare(): Promise<Preparation[] | null> {
+    if (!parsed.raw) return null;
     setStage("preparing");
     setError(null);
-    setResult(null);
+    setResults([]);
     try {
       const next = await prepareTransfer(
         parsed.raw,
@@ -300,9 +307,21 @@ export default function App() {
         ),
       );
       setStage("ready");
+      return next;
     } catch (reason) {
       fail(reason);
+      return null;
     }
+  }
+
+  async function prepareAndSend() {
+    const next = await prepare();
+    if (!next) return;
+    if (network === "mainnet") {
+      setShowReview(true);
+      return;
+    }
+    await signAndSend(next);
   }
 
   async function requestSend() {
@@ -311,14 +330,14 @@ export default function App() {
       setShowReview(true);
       return;
     }
-    await signAndSend();
+    await signAndSend(preparations);
   }
 
-  async function signAndSend() {
-    if (preparations.length === 0) return;
+  async function signAndSend(activePreparations: Preparation[]) {
+    if (activePreparations.length === 0) return;
     setShowReview(false);
     const managedAddresses = new Set(vaultKeys.map((keypair) => keypair.address));
-    const requiredSigners = [...new Set(preparations.flatMap((item) => item.requiredSigners))];
+    const requiredSigners = [...new Set(activePreparations.flatMap((item) => item.requiredSigners))];
     const canUseVault = requiredSigners.every((signer) => managedAddresses.has(signer));
     const externalProvider = getSignerProvider();
     if (!externalProvider && !canUseVault) {
@@ -336,8 +355,14 @@ export default function App() {
       setSignerStatuses(
         Object.fromEntries(requiredSigners.map((signer) => [signer, "waiting"])),
       );
-      let submission: SubmissionResult | null = null;
-      for (const item of preparations) {
+      const preparedBlockhash = activePreparations[0]?.recentBlockhash;
+      if (activePreparations.some((item) => item.recentBlockhash !== preparedBlockhash)) {
+        throw new Error("Prepared batches do not share one recent blockhash; prepare them again");
+      }
+
+      // Finish every signature request before broadcasting anything. This keeps a
+      // slow signer or confirmation poll from delaying the remaining batches.
+      const signedTransactions = await Promise.all(activePreparations.map(async (item) => {
         const vaultProvider = createVaultSignerProvider(item.preparationId);
         const provider = externalProvider
           ? {
@@ -357,11 +382,29 @@ export default function App() {
             setSignerStatuses((current) => ({ ...current, [signerAddress]: status }));
           },
         );
-        setStage("submitting");
-        submission = await submitTransfer(item.preparationId, encodeSignedTransaction(signed));
-        setStage("signing");
+        return encodeSignedTransaction(signed);
+      }));
+
+      setStage("submitting");
+      const settledSubmissions = await Promise.allSettled(
+        activePreparations.map((item, index) =>
+          submitTransfer(item.preparationId, signedTransactions[index]!),
+        ),
+      );
+      const submissions = settledSubmissions.flatMap((submission) =>
+        submission.status === "fulfilled" ? [submission.value] : [],
+      );
+      setResults(submissions);
+      const failedSubmissions = settledSubmissions.filter(
+        (submission): submission is PromiseRejectedResult => submission.status === "rejected",
+      );
+      if (failedSubmissions.length > 0) {
+        const firstReason = failedSubmissions[0]!.reason;
+        const detail = firstReason instanceof Error ? firstReason.message : String(firstReason);
+        throw new Error(
+          `${failedSubmissions.length} of ${activePreparations.length} transactions failed: ${detail}`,
+        );
       }
-      setResult(submission);
       setStage("confirmed");
     } catch (reason) {
       fail(reason);
@@ -380,7 +423,7 @@ export default function App() {
           <span className="mark" aria-hidden="true"><i /><i /><i /></span>
           <div>
             <h1>Solana workbench</h1>
-            <p>{activeTab === "guide" ? "Practical recipes for tokens, keys, and transactions." : activeTab === "minting" ? "Create and track classic SPL Token mints." : transactionVersion === 0
+            <p>{activeTab === "guide" ? "Practical recipes for tokens, keys, and transactions." : activeTab === "minting" ? "Create and manage SPL Token mints." : activeTab === "liquidity" ? "Open markets and manage custom AMM liquidity." : transactionVersion === 0
               ? "ALT-compressed distributor transactions."
               : "Larger v1 transactions with direct System transfers."}</p>
           </div>
@@ -390,6 +433,7 @@ export default function App() {
             <button type="button" className={activeTab === "workbench" ? "active" : ""} onClick={() => setActiveTab("workbench")}>Workbench</button>
             <button type="button" className={activeTab === "keygen" ? "active" : ""} onClick={() => setActiveTab("keygen")}>Keygen <span>{vaultKeys.length}</span></button>
             <button type="button" className={activeTab === "minting" ? "active" : ""} onClick={() => setActiveTab("minting")}>Minting</button>
+            <button type="button" className={activeTab === "liquidity" ? "active" : ""} onClick={() => setActiveTab("liquidity")}>Liquidity</button>
             <button type="button" className={activeTab === "guide" ? "active" : ""} onClick={() => setActiveTab("guide")}>Tokens</button>
           </nav>
           <div className="network-switch" aria-label="Solana network">
@@ -539,10 +583,31 @@ export default function App() {
               <h2>{plan?.type === "consolidation" ? "Consolidation flow" : "Share flow"}</h2>
               <p>{flowDescription(plan)}</p>
             </div>
-            <span className="one-tx"><strong>{preparation?.quote.transactionCount ?? 1}</strong> transaction{preparation?.quote.transactionCount === 1 ? "" : "s"}</span>
+            <div className="review-heading-actions">
+              <button
+                className="flip-transfer-button"
+                type="button"
+                disabled={!plan}
+                onClick={flipTransferDirection}
+                aria-label="Flip senders and receivers"
+                title={plan ? "Reverse the transfer direction" : "Enter a valid plan with explicit receivers to flip it"}
+              >
+                <span aria-hidden="true">⇄</span>
+                Flip
+              </button>
+              <span className="one-tx"><strong>{preparation?.quote.transactionCount ?? 1}</strong> transaction{(preparation?.quote.transactionCount ?? 1) === 1 ? "" : "s"}</span>
+            </div>
           </div>
 
           <WalletRail plan={plan} lookupPlan={preparation ? null : parsed.lookupPlan} />
+
+          <TransactionBreakdown
+            plan={plan}
+            lookupPlan={preparation ? null : parsed.lookupPlan}
+            preparations={preparations}
+            transactionVersion={transactionVersion}
+            pluginId={plan?.plugin ?? parsed.lookupPlan?.plugin ?? pluginId}
+          />
 
           <div className="route-section">
             <div className="section-title">
@@ -589,12 +654,27 @@ export default function App() {
           )}
 
           {error && <div className="alert error-alert" role="alert"><strong>Action stopped</strong><span>{error}</span></div>}
-          {result && (
-            <div className="alert success-alert" role="status">
-              <strong>{result.status === "confirmed" ? "Transaction confirmed" : "Transaction submitted"}</strong>
-              <span>{(result.confirmationMs / 1000).toFixed(1)} seconds</span>
-              <a href={result.explorerUrl} target="_blank" rel="noreferrer">Open in Orb</a>
-            </div>
+          {results.length > 0 && (
+            <section className="submission-results" role="status" aria-labelledby="submission-results-title">
+              <div className="submission-results-header">
+                <strong id="submission-results-title">
+                  {results.length} transaction{results.length === 1 ? "" : "s"} submitted
+                </strong>
+                <span>{results.filter((result) => result.status === "confirmed").length} confirmed</span>
+              </div>
+              <ol>
+                {results.map((result, index) => (
+                  <li key={result.signature}>
+                    <span className={`submission-status ${result.status}`}>
+                      Transaction {index + 1} · {result.status}
+                    </span>
+                    <code title={result.signature}>{result.signature}</code>
+                    <span>{(result.confirmationMs / 1000).toFixed(1)}s</span>
+                    <a href={result.explorerUrl} target="_blank" rel="noreferrer">Open in Orb</a>
+                  </li>
+                ))}
+              </ol>
+            </section>
           )}
 
           <div className="action-bar">
@@ -603,11 +683,16 @@ export default function App() {
               <span>{stageLabel(stage)}</span>
             </div>
             {!preparation ? (
-              <button className="primary" disabled={!parsed.raw || stage === "preparing"} onClick={prepare} type="button">
-                {stage === "preparing" ? "Preparing live quote…" : "Prepare live quote"}
-              </button>
+              <div className="action-buttons">
+                <button className="secondary" disabled={!parsed.raw || stage === "preparing"} onClick={() => void prepare()} type="button">
+                  {stage === "preparing" ? "Preparing live quote…" : "Prepare live quote"}
+                </button>
+                <button className="primary" disabled={!parsed.raw || stage === "preparing"} onClick={() => void prepareAndSend()} type="button">
+                  {stage === "preparing" ? "Preparing…" : `Prepare & send on ${network}`}
+                </button>
+              </div>
             ) : (
-              <button className="primary" disabled={stage === "signing" || stage === "submitting"} onClick={requestSend} type="button">
+              <button className="primary" disabled={stage === "signing" || stage === "submitting"} onClick={() => void requestSend()} type="button">
                 {stage === "signing" ? "Collecting signatures…" : stage === "submitting" ? "Submitting…" : `Sign and send on ${network}`}
               </button>
             )}
@@ -632,6 +717,8 @@ export default function App() {
           transactionVersion={transactionVersion}
           keypairs={vaultKeys}
         />
+      ) : activeTab === "liquidity" ? (
+        <LiquidityTab network={network} transactionVersion={transactionVersion} keypairs={vaultKeys} />
       ) : (
         <GuideTab onNavigate={setActiveTab} />
       )}
@@ -645,7 +732,7 @@ export default function App() {
             <QuoteRows quote={aggregateQuote(preparations)} />
             <div className="modal-actions">
               <button className="secondary" onClick={() => setShowReview(false)} type="button">Cancel</button>
-              <button className="danger" onClick={signAndSend} type="button">Sign mainnet transaction</button>
+              <button className="danger" onClick={() => void signAndSend(preparations)} type="button">Sign mainnet transaction</button>
             </div>
           </section>
         </div>
@@ -678,6 +765,7 @@ function KeygenPanel({
   const [count, setCount] = useState(1);
   const [randomCount, setRandomCount] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
+  const [requestedWalletPage, setWalletPage] = useState(1);
   const [ledgerExpandedOverride, setLedgerExpandedOverride] = useState<boolean | null>(null);
   const [altAuthority, setAltAuthority] = useState("");
   const [altBusy, setAltBusy] = useState(false);
@@ -687,6 +775,10 @@ function KeygenPanel({
   const [registeringAlt, setRegisteringAlt] = useState(false);
   const selectedSet = new Set(selected);
   const ledgerExpanded = ledgerExpandedOverride ?? keypairs.length <= 25;
+  const walletPageCount = Math.max(1, Math.ceil(keypairs.length / KEYGEN_PAGE_SIZE));
+  const walletPage = Math.min(requestedWalletPage, walletPageCount);
+  const walletPageStart = (walletPage - 1) * KEYGEN_PAGE_SIZE;
+  const visibleKeypairs = keypairs.slice(walletPageStart, walletPageStart + KEYGEN_PAGE_SIZE);
   const canSelectRandom = Number.isSafeInteger(randomCount) && randomCount >= 1 && randomCount <= keypairs.length;
   const resolvedAltAuthority = keypairs.some((keypair) => keypair.address === altAuthority)
     ? altAuthority
@@ -909,19 +1001,44 @@ function KeygenPanel({
           <p>Generate a keypair here or place a compatible key file in <code>generated-keys/</code>, then refresh.</p>
         </div>
       ) : ledgerExpanded ? (
-        <ol className="key-ledger" id="managed-wallet-list">
-          {keypairs.map((keypair, index) => (
-            <li key={keypair.address} className={selectedSet.has(keypair.address) ? "selected" : ""}>
-              <label>
-                <input type="checkbox" checked={selectedSet.has(keypair.address)} onChange={() => toggle(keypair.address)} />
-                <span className={`wallet-ident ident-${index % 4}`} />
-                <span className="ledger-address"><strong>{shortAddress(keypair.address)}</strong><code>{keypair.address}</code></span>
-                <span className="ledger-file"><strong>{keypair.file}</strong><small>{formatVaultDate(keypair.createdAt)}</small></span>
-                <span className="custody-badge">Ready to sign</span>
-              </label>
-            </li>
-          ))}
-        </ol>
+        <div className="key-ledger-page">
+          <ol className="key-ledger" id="managed-wallet-list">
+            {visibleKeypairs.map((keypair, index) => (
+              <li key={keypair.address} className={selectedSet.has(keypair.address) ? "selected" : ""}>
+                <label>
+                  <input type="checkbox" checked={selectedSet.has(keypair.address)} onChange={() => toggle(keypair.address)} />
+                  <span className={`wallet-ident ident-${(walletPageStart + index) % 4}`} />
+                  <span className="ledger-address"><strong>{shortAddress(keypair.address)}</strong><code>{keypair.address}</code></span>
+                  <span className="ledger-file"><strong>{keypair.file}</strong><small>{formatVaultDate(keypair.createdAt)}</small></span>
+                  <span className="custody-badge">Ready to sign</span>
+                </label>
+              </li>
+            ))}
+          </ol>
+          <nav className="key-ledger-pagination" aria-label="Managed wallet pages">
+            <span>
+              Showing {(walletPageStart + 1).toLocaleString()}–{Math.min(walletPageStart + KEYGEN_PAGE_SIZE, keypairs.length).toLocaleString()} of {keypairs.length.toLocaleString()}
+              {selected.length > 0 ? ` · ${selected.length.toLocaleString()} selected total` : ""}
+            </span>
+            <div>
+              <button
+                className="secondary"
+                type="button"
+                aria-label="Previous wallet page"
+                disabled={walletPage === 1}
+                onClick={() => setWalletPage(walletPage - 1)}
+              >Previous</button>
+              <strong aria-live="polite">Page {walletPage} of {walletPageCount}</strong>
+              <button
+                className="secondary"
+                type="button"
+                aria-label="Next wallet page"
+                disabled={walletPage === walletPageCount}
+                onClick={() => setWalletPage(walletPage + 1)}
+              >Next</button>
+            </div>
+          </nav>
+        </div>
       ) : (
         <button
           className="vault-collapsed"
@@ -1034,6 +1151,123 @@ function Wallet({ address, amount, index }: { address: string; amount?: string; 
   );
 }
 
+function TransactionBreakdown({
+  plan,
+  lookupPlan,
+  preparations,
+  transactionVersion,
+  pluginId,
+}: {
+  plan: TransferPlan | null;
+  lookupPlan: LookupTableSharePlanInput | null;
+  preparations: Preparation[];
+  transactionVersion: TransactionVersion;
+  pluginId: string;
+}) {
+  const preparation = preparations[0] ?? null;
+  const previewPlan = plan ?? lookupPlan;
+  if (!previewPlan) {
+    return (
+      <section className="transaction-breakdown" aria-labelledby="transaction-breakdown-title">
+        <div className="section-title">
+          <h3 id="transaction-breakdown-title">Transaction breakdown</h3>
+          <span>Waiting for a valid plan</span>
+        </div>
+        <p className="breakdown-empty">The message format, instructions, and signing requirements will appear here.</p>
+      </section>
+    );
+  }
+
+  const transferCount = previewPlan.type === "share"
+    ? previewPlan.receivers.length + lookupRecipientCount(lookupPlan)
+    : previewPlan.senders.length;
+  const feePayer = preparation?.feePayer ?? previewPlan.feePayer ?? previewPlan.senders[0]?.address;
+  const nativeTransfer = pluginId === "native-sol-transfer";
+  const distributorCall = nativeTransfer && transactionVersion === 0 && previewPlan.type === "share";
+  const hasTip = preparation
+    ? BigInt(preparation.quote.senderTipLamports) > 0n
+    : false;
+  const altCount = preparation
+    ? Object.keys(preparation.addressLookupTables ?? {}).length
+    : previewPlan.addressLookupTables?.length ?? lookupPlan?.receiversFromLookupTables.length ?? 0;
+  const signerCount = preparation?.requiredSigners.length
+    ?? new Set([...previewPlan.senders.map((sender) => sender.address), ...(previewPlan.feePayer ? [previewPlan.feePayer] : [])]).size;
+  const total = plan ? `${lamportsToSol(getTransferTotal(plan))} SOL` : "Resolved with quote";
+  const stepCount = nativeTransfer
+    ? (distributorCall ? 1 : transferCount) + 1 + (hasTip ? 1 : 0)
+    : null;
+
+  return (
+    <section className="transaction-breakdown" aria-labelledby="transaction-breakdown-title">
+      <div className="section-title">
+        <h3 id="transaction-breakdown-title">Transaction breakdown</h3>
+        <span>{preparation ? "Live message shape" : "Plan preview"}</span>
+      </div>
+      <div className="breakdown-shell">
+        <dl className="breakdown-summary">
+          <div><dt>Format</dt><dd>v{transactionVersion} message</dd></div>
+          <div><dt>Fee payer</dt><dd title={feePayer}>{feePayer ? shortAddress(feePayer) : "Pending"}</dd></div>
+          <div><dt>SOL moved</dt><dd>{total}</dd></div>
+          <div><dt>Signatures</dt><dd>{signerCount}</dd></div>
+        </dl>
+
+        <ol className="instruction-stack" aria-label="Transaction instruction outline">
+          <li>
+            <span className="instruction-index">1</span>
+            <span className="instruction-copy">
+              <strong>{transactionVersion === 0 ? "Compute budget" : "Resource budget"}</strong>
+              <small>{preparation
+                ? `${preparation.computeUnitLimit.toLocaleString()} CU${preparation.microLamportsPerComputeUnit > 0 ? ` at ${preparation.microLamportsPerComputeUnit.toLocaleString()} μ-lamports/CU` : ""}`
+                : "Limit and priority price are set by the live quote"}</small>
+            </span>
+            <code>{transactionVersion === 0 ? "ComputeBudget" : "v1 config"}</code>
+          </li>
+          <li>
+            <span className="instruction-index">2</span>
+            <span className="instruction-copy">
+              <strong>{distributorCall
+                ? "Distribute SOL"
+                : nativeTransfer
+                  ? `${transferCount.toLocaleString()} SOL transfer${transferCount === 1 ? "" : "s"}`
+                  : "Transfer strategy"}</strong>
+              <small>{distributorCall
+                ? `One program call fans out to ${transferCount.toLocaleString()} recipient${transferCount === 1 ? "" : "s"}${preparations.length > 1 ? " per prepared batch" : ""}`
+                : nativeTransfer
+                  ? previewPlan.type === "share" ? "Source wallets pay the listed destinations" : "Each source pays the shared destination"
+                  : `Instructions are supplied by ${pluginId}`}</small>
+            </span>
+            <code>{distributorCall ? "Distributor" : nativeTransfer ? "SystemProgram" : "Plugin"}</code>
+          </li>
+          {hasTip && (
+            <li>
+              <span className="instruction-index">3</span>
+              <span className="instruction-copy"><strong>Sender tip</strong><small>{formatLamports(preparation!.quote.senderTipLamports)} SOL from the fee payer</small></span>
+              <code>SystemProgram</code>
+            </li>
+          )}
+        </ol>
+
+        <div className="breakdown-footer">
+          <span><i className={preparation ? "resolved" : ""} />Recent blockhash {preparation ? "attached" : "added at quote time"}</span>
+          <span>{altCount > 0 ? `${altCount} address lookup table${altCount === 1 ? "" : "s"}` : "Inline account addresses"}</span>
+          <span>{stepCount === null ? "Plugin-defined instructions" : `${stepCount} message step${stepCount === 1 ? "" : "s"} summarized`}</span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function lookupRecipientCount(plan: LookupTableSharePlanInput | null): number {
+  if (!plan) return 0;
+  return plan.receiversFromLookupTables.reduce((total, selection) => {
+    const indexes = new Set(selection.indexes ?? []);
+    for (const range of selection.ranges ?? []) {
+      for (let index = range.start; index <= range.end; index += 1) indexes.add(index);
+    }
+    return total + indexes.size;
+  }, 0);
+}
+
 function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
@@ -1044,6 +1278,30 @@ function jsonSummary(lineCount: number, plan: TransferPlan | null): string {
   const senders = `${plan.senders.length.toLocaleString()} sender${plan.senders.length === 1 ? "" : "s"}`;
   const receivers = `${plan.receivers.length.toLocaleString()} receiver${plan.receivers.length === 1 ? "" : "s"}`;
   return `${lines}; ${senders}, ${receivers}`;
+}
+
+export function flipTransferPlan(plan: TransferPlan): TransferPlan {
+  const sharedFields = {
+    ...(plan.feePayer ? { feePayer: plan.feePayer } : {}),
+    ...(plan.plugin ? { plugin: plan.plugin } : {}),
+    ...(plan.addressLookupTables ? { addressLookupTables: plan.addressLookupTables } : {}),
+  };
+
+  if (plan.type === "share") {
+    return {
+      type: "consolidation",
+      senders: plan.receivers.map(({ address, amountSol }) => ({ address, amountSol })),
+      receivers: [{ address: plan.senders[0].address }],
+      ...sharedFields,
+    };
+  }
+
+  return {
+    type: "share",
+    senders: [{ address: plan.receivers[0].address }],
+    receivers: plan.senders.map(({ address, amountSol }) => ({ address, amountSol })),
+    ...sharedFields,
+  };
 }
 
 function sampleWithoutReplacement<T>(values: readonly T[], count: number): T[] {

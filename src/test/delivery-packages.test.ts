@@ -6,7 +6,7 @@ import {
 } from "@solana-workbench/delivery-custom";
 import { fastAdapter, FAST_TIP_LAMPORTS } from "@solana-workbench/delivery-fast";
 import { maxAdapter, MAX_TIP_LAMPORTS } from "@solana-workbench/delivery-max";
-import { rpcCall, type DeliveryQuoteContext } from "@solana-workbench/delivery-sdk";
+import { rpcCall, waitForConfirmation, type DeliveryQuoteContext } from "@solana-workbench/delivery-sdk";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -67,5 +67,27 @@ describe("delivery workspace packages", () => {
 
     await expect(rpcCall<number>("https://rpc.example", "getSlot")).resolves.toBe(42);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces concurrent transaction confirmations into one status poll", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const request = JSON.parse(String(init?.body)) as { method: string; params: [string[]] };
+      expect(request.method).toBe("getSignatureStatuses");
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        result: {
+          value: request.params[0].map(() => ({ err: null, confirmationStatus: "confirmed" })),
+        },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+
+    await expect(Promise.all([
+      waitForConfirmation("https://rpc.example", "signature-one", 1_000n),
+      waitForConfirmation("https://rpc.example", "signature-two", 1_000n),
+      waitForConfirmation("https://rpc.example", "signature-three", 1_000n),
+    ])).resolves.toEqual(["confirmed", "confirmed", "confirmed"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const request = JSON.parse(String(fetchMock.mock.calls[0]![1]?.body)) as { params: [string[]] };
+    expect(request.params[0]).toEqual(["signature-one", "signature-two", "signature-three"]);
   });
 });

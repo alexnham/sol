@@ -9,6 +9,7 @@ describe("workbench UI", () => {
     expect(screen.getByRole("button", { name: "Fast delivery route" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Sender Max delivery route" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Prepare live quote" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Prepare & send on devnet" })).toBeEnabled();
   });
 
   it("switches between v0 and v1 transaction formats", () => {
@@ -19,6 +20,21 @@ describe("workbench UI", () => {
     fireEvent.click(v1);
     expect(v1).toHaveClass("active");
     expect(screen.getByText("Larger v1 transactions with direct System transfers.")).toBeInTheDocument();
+  });
+
+  it("shows a plain-language transaction breakdown for the current plan", () => {
+    render(<App />);
+
+    expect(screen.getByRole("heading", { name: "Transaction breakdown" })).toBeInTheDocument();
+    expect(screen.getByText("v0 message")).toBeInTheDocument();
+    expect(screen.getByText("Distribute SOL")).toBeInTheDocument();
+    expect(screen.getByText("0.002 SOL")).toBeInTheDocument();
+    expect(screen.getByText("One program call fans out to 2 recipients")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "v1" }));
+    expect(screen.getByText("v1 message")).toBeInTheDocument();
+    expect(screen.getByText("2 SOL transfers")).toBeInTheDocument();
+    expect(screen.getByText("SystemProgram")).toBeInTheDocument();
   });
 
   it("loads valid share and consolidation demo templates", () => {
@@ -39,6 +55,32 @@ describe("workbench UI", () => {
       plugin: "native-sol-transfer",
     });
     expect(screen.getByRole("heading", { name: "Share flow" })).toBeInTheDocument();
+  });
+
+  it("flips senders and receivers while preserving wallet amounts and plan options", () => {
+    render(<App />);
+    const editor = screen.getByLabelText("Transfer plan JSON") as HTMLTextAreaElement;
+    const original = JSON.parse(editor.value);
+
+    fireEvent.click(screen.getByRole("button", { name: "Flip senders and receivers" }));
+
+    expect(JSON.parse(editor.value)).toEqual({
+      type: "consolidation",
+      senders: original.receivers,
+      receivers: [{ address: original.senders[0].address }],
+      plugin: original.plugin,
+    });
+    expect(screen.getByRole("heading", { name: "Consolidation flow" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Flip senders and receivers" }));
+    expect(JSON.parse(editor.value)).toEqual(original);
+    expect(screen.getByRole("heading", { name: "Share flow" })).toBeInTheDocument();
+  });
+
+  it("disables flipping when ALT recipients have not been resolved", () => {
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Demo template"), { target: { value: "alt-selection" } });
+    expect(screen.getByRole("button", { name: "Flip senders and receivers" })).toBeDisabled();
   });
 
   it("loads both ALT demo styles", () => {
@@ -180,6 +222,31 @@ describe("workbench UI", () => {
     expect(actions).toHaveTextContent("Change/revoke metadata authority");
   });
 
+  it("opens the devnet Liquidity desk with tracked token choices", async () => {
+    const authority = "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ";
+    const mints = ["Cas5qTBtAr6kPFt1LRW431JkYzqXm2Z49XMD5xAa3wuQ", "BApRNbirCZhPJ2uHAcesJNJCEwCz98p9o6W4f6bc4yr1"];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      const body = path.endsWith("/api/keypairs")
+        ? { keypairs: [{ address: authority, file: "wallets.txt", createdAt: "2026-09-27T00:00:00.000Z" }] }
+        : path.startsWith("/api/token-mints?")
+          ? { tokenMints: mints.map((mint, index) => ({ mint, name: `Token ${index}`, symbol: `T${index}`, decimals: 6, initialSupplyBaseUnits: "1000000", supplyBaseUnits: "1000000", network: "devnet", transactionVersion: 0, mintAuthorityAtCreation: authority, freezeAuthorityAtCreation: null, mintAuthorityRevoked: false, freezeAuthorityRevoked: false, creationSignature: "sig", createdAt: "2026-09-27T00:00:00.000Z", tokenProgram: "classic", liveStatus: "available" })) }
+          : path.startsWith("/api/liquidity-pools?")
+            ? { liquidityPools: [] }
+            : path.endsWith("/api/address-lookup-tables")
+              ? { addressLookupTables: [] }
+              : { transfer: [{ id: "native-sol-transfer", label: "Native SOL transfer" }], delivery: [] };
+      return { ok: true, json: async () => body } as Response;
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Liquidity" }));
+    expect(screen.getByRole("heading", { name: "Liquidity desk" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: /T0/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create pool + seed reserves" })).toBeEnabled();
+    expect(screen.getByText("No tracked pools")).toBeInTheDocument();
+  });
+
   it("presents CLI how-to recipes and links back to the visual tools", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: "Tokens" }));
@@ -222,7 +289,7 @@ describe("workbench UI", () => {
     expect(screen.getByRole("button", { name: "Add to transfer JSON" })).toBeEnabled();
   });
 
-  it("collapses large managed-wallet lists by default and lets the operator expand them", async () => {
+  it("paginates managed wallets while random selection spans every page", async () => {
     const keypairs = Array.from({ length: 30 }, (_, index) => ({
       address: `wallet-${index}`,
       file: "many-wallets.txt",
@@ -252,8 +319,17 @@ describe("workbench UI", () => {
 
     fireEvent.click(showWallets);
     expect(screen.getByRole("button", { name: "Hide wallets" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Page 1 of 2")).toBeInTheDocument();
+    expect(screen.getByText("wallet-24", { selector: "code" })).toBeInTheDocument();
+    expect(screen.queryByText("wallet-29", { selector: "code" })).not.toBeInTheDocument();
+    const firstPageSelected = document.querySelectorAll(".key-ledger input:checked").length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Next wallet page" }));
+    expect(screen.getByText("Page 2 of 2")).toBeInTheDocument();
     expect(screen.getByText("wallet-29", { selector: "code" })).toBeInTheDocument();
-    expect(document.querySelectorAll(".key-ledger input:checked")).toHaveLength(7);
+    const secondPageSelected = document.querySelectorAll(".key-ledger input:checked").length;
+    expect(firstPageSelected + secondPageSelected).toBe(7);
+    expect(screen.getByText(/7 selected total/)).toBeInTheDocument();
   });
 
   it("creates an ALT from selected managed wallets and adds it to the transfer JSON", async () => {

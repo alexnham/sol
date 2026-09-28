@@ -52,7 +52,7 @@ interface RpcEnvelope<T> {
 }
 
 export async function rpcCall<T>(rpcUrl: string, method: string, params: unknown[] = []): Promise<T> {
-  const maxAttempts = 4;
+  const maxAttempts = 8;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const response = await fetch(rpcUrl, {
       method: "POST",
@@ -83,11 +83,15 @@ export async function rpcCall<T>(rpcUrl: string, method: string, params: unknown
 }
 
 function retryDelayMs(retryAfter: string | null, attempt: number): number {
+  const baseDelay = Math.min(4_000, 250 * (2 ** attempt));
+  const jitter = Math.floor(Math.random() * baseDelay);
   if (retryAfter !== null) {
     const seconds = Number(retryAfter);
-    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(5_000, seconds * 1_000);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(5_000, seconds * 1_000) + jitter;
+    }
   }
-  return Math.min(2_000, 250 * (2 ** attempt));
+  return baseDelay + jitter;
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -100,23 +104,108 @@ export async function waitForConfirmation(
   lastValidBlockHeight: bigint,
   timeoutMs = 60_000,
 ): Promise<"confirmed" | "pending"> {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const statuses = await rpcCall<{
-      value: Array<null | { err: unknown; confirmationStatus?: string }>;
-    }>(rpcUrl, "getSignatureStatuses", [[signature], { searchTransactionHistory: true }]);
-    const status = statuses.value[0];
-    if (status?.err) throw new Error(`Transaction failed: ${JSON.stringify(status.err)}`);
-    if (status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized") {
-      return "confirmed";
+  return new Promise((resolve, reject) => {
+    const key = `${rpcUrl}\n${lastValidBlockHeight}`;
+    let group = confirmationGroups.get(key);
+    if (!group) {
+      group = { rpcUrl, lastValidBlockHeight, waiters: new Map() };
+      confirmationGroups.set(key, group);
+      // Allow concurrently broadcast transactions to join the same first poll.
+      setTimeout(() => void pollConfirmationGroup(key, group!), 25);
     }
-    const height = await rpcCall<number>(rpcUrl, "getBlockHeight", [{ commitment: "confirmed" }]);
-    if (BigInt(height) > lastValidBlockHeight) {
-      throw new Error("The transaction blockhash expired before confirmation");
+    const waiter: ConfirmationWaiter = {
+      startedAt: Date.now(),
+      timeoutMs,
+      resolve,
+      reject,
+    };
+    const current = group.waiters.get(signature) ?? [];
+    current.push(waiter);
+    group.waiters.set(signature, current);
+  });
+}
+
+interface ConfirmationWaiter {
+  startedAt: number;
+  timeoutMs: number;
+  resolve(status: "confirmed" | "pending"): void;
+  reject(reason: unknown): void;
+}
+
+interface ConfirmationGroup {
+  rpcUrl: string;
+  lastValidBlockHeight: bigint;
+  waiters: Map<string, ConfirmationWaiter[]>;
+}
+
+const confirmationGroups = new Map<string, ConfirmationGroup>();
+
+async function pollConfirmationGroup(key: string, group: ConfirmationGroup): Promise<void> {
+  try {
+    while (group.waiters.size > 0) {
+      const signatures = [...group.waiters.keys()];
+      try {
+        const statuses = await rpcCall<{
+          value: Array<null | { err: unknown; confirmationStatus?: string }>;
+        }>(group.rpcUrl, "getSignatureStatuses", [signatures, { searchTransactionHistory: true }]);
+
+        statuses.value.forEach((status, index) => {
+          const signature = signatures[index];
+          if (!signature || !status) return;
+          if (status.err) {
+            settleConfirmation(group, signature, "reject", new Error(
+              `Transaction ${signature} failed: ${JSON.stringify(status.err)}`,
+            ));
+          } else if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") {
+            settleConfirmation(group, signature, "resolve", "confirmed");
+          }
+        });
+
+        if (group.waiters.size > 0) {
+          const height = await rpcCall<number>(group.rpcUrl, "getBlockHeight", [{ commitment: "confirmed" }]);
+          if (BigInt(height) > group.lastValidBlockHeight) {
+            for (const pendingSignature of [...group.waiters.keys()]) {
+              settleConfirmation(group, pendingSignature, "reject", new Error(
+                `Transaction ${pendingSignature} blockhash expired before confirmation`,
+              ));
+            }
+          }
+        }
+      } catch {
+        // A submitted transaction must not be reported as failed merely because
+        // the confirmation RPC was temporarily rate limited. Keep polling until
+        // its timeout and report it as pending if status remains unavailable.
+      }
+
+      const now = Date.now();
+      for (const [pendingSignature, waiters] of group.waiters) {
+        const active = waiters.filter((waiter) => {
+          if (now - waiter.startedAt < waiter.timeoutMs) return true;
+          waiter.resolve("pending");
+          return false;
+        });
+        if (active.length > 0) group.waiters.set(pendingSignature, active);
+        else group.waiters.delete(pendingSignature);
+      }
+      if (group.waiters.size > 0) await delay(2_000);
     }
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  } finally {
+    confirmationGroups.delete(key);
   }
-  return "pending";
+}
+
+function settleConfirmation(
+  group: ConfirmationGroup,
+  signature: string,
+  action: "resolve" | "reject",
+  value: "confirmed" | Error,
+): void {
+  const waiters = group.waiters.get(signature) ?? [];
+  group.waiters.delete(signature);
+  for (const waiter of waiters) {
+    if (action === "resolve") waiter.resolve(value as "confirmed");
+    else waiter.reject(value);
+  }
 }
 
 export function priorityQuote(

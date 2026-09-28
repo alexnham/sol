@@ -7,6 +7,7 @@ import type {
   TransactionVersion,
 } from "../shared/contracts";
 import type { CreateTokenMintRequest, ManageTokenMintRequest, TokenMintActionResult, TrackedTokenMint } from "../shared/token-mints";
+import type { CreateLiquidityPoolRequest, LiquidityActionResult, ManageLiquidityPoolRequest, TrackedLiquidityPool } from "../shared/liquidity";
 
 export interface VaultKeyMetadata {
   address: string;
@@ -143,4 +144,20 @@ export function manageTokenMint(input: ManageTokenMintRequest): Promise<TokenMin
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export async function fetchLiquidityPools(network: Network): Promise<TrackedLiquidityPool[]> {
+  const result = await request<{ liquidityPools: TrackedLiquidityPool[] }>(
+    `/api/liquidity-pools?network=${encodeURIComponent(network)}`,
+    { method: "GET" },
+  );
+  return result.liquidityPools;
+}
+
+export function createLiquidityPool(input: CreateLiquidityPoolRequest): Promise<LiquidityActionResult> {
+  return request("/api/liquidity-pools", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function manageLiquidityPool(input: ManageLiquidityPoolRequest): Promise<LiquidityActionResult> {
+  return request("/api/liquidity-pools/manage", { method: "POST", body: JSON.stringify(input) });
 }

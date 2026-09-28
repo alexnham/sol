@@ -21,6 +21,8 @@ import { createAddressLookupTable } from "./create-address-lookup-table";
 import { listStoredAddressLookupTables, recordAddressLookupTable } from "./alt-registry";
 import { createTokenMint, listTokenMints, manageTokenMint, validateTokenMintRequest } from "./token-mints";
 import type { CreateTokenMintRequest, ManageTokenMintRequest } from "../shared/token-mints";
+import { createLiquidityPool, listLiquidityPools, manageLiquidityPool } from "./liquidity";
+import type { CreateLiquidityPoolRequest, ManageLiquidityPoolRequest } from "../shared/liquidity";
 
 const directory = fileURLToPath(new URL(".", import.meta.url));
 dotenv.config({ path: resolve(directory, "../.env") });
@@ -28,6 +30,7 @@ dotenv.config({ path: resolve(directory, "../.env") });
 const app = express();
 const preparations = new Map<string, StoredPreparation>();
 const altCreationLocks = new Set<string>();
+const blockHeightReads = new Map<string, { expiresAt: number; promise: Promise<number> }>();
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1";
 
@@ -148,6 +151,34 @@ app.post("/api/token-mints/manage", async (request, response, next) => {
   }
 });
 
+app.get("/api/liquidity-pools", async (request, response, next) => {
+  try {
+    const network = request.query.network;
+    if (network !== "devnet" && network !== "mainnet") throw new Error("Network must be devnet or mainnet");
+    response.json({ liquidityPools: await listLiquidityPools(getRpcUrl(network), network) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/liquidity-pools", async (request, response, next) => {
+  try {
+    const body = request.body as CreateLiquidityPoolRequest;
+    response.status(201).json(await createLiquidityPool(getRpcUrl(body.network), body, await getVaultSigner(body.provider)));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/liquidity-pools/manage", async (request, response, next) => {
+  try {
+    const body = request.body as ManageLiquidityPoolRequest;
+    response.json(await manageLiquidityPool(getRpcUrl(body.network), body, await getVaultSigner(body.provider)));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/address-lookup-tables", async (request, response, next) => {
   const body = request.body as { network?: unknown; authority?: unknown; addresses?: unknown };
   const lockKey = `${body.network}:${body.authority}`;
@@ -247,7 +278,7 @@ app.post("/api/submit", async (request: Request, response: Response, next: NextF
     }
 
     const rpcUrl = getRpcUrl(stored.preparation.network);
-    const blockHeight = await rpcCall<number>(rpcUrl, "getBlockHeight", [{ commitment: "confirmed" }]);
+    const blockHeight = await getSharedBlockHeight(rpcUrl);
     if (BigInt(blockHeight) > BigInt(stored.preparation.lastValidBlockHeight)) {
       preparations.delete(body.preparationId);
       throw new Error("The prepared blockhash expired; prepare and sign again");
@@ -266,6 +297,20 @@ app.post("/api/submit", async (request: Request, response: Response, next: NextF
     next(error);
   }
 });
+
+function getSharedBlockHeight(rpcUrl: string): Promise<number> {
+  const now = Date.now();
+  const current = blockHeightReads.get(rpcUrl);
+  if (current && current.expiresAt > now) return current.promise;
+
+  const promise = rpcCall<number>(rpcUrl, "getBlockHeight", [{ commitment: "confirmed" }]);
+  const entry = { expiresAt: now + 500, promise };
+  blockHeightReads.set(rpcUrl, entry);
+  void promise.catch(() => {
+    if (blockHeightReads.get(rpcUrl) === entry) blockHeightReads.delete(rpcUrl);
+  });
+  return promise;
+}
 
 const dist = resolve(directory, "../../dist");
 if (existsSync(dist)) app.use(express.static(dist));

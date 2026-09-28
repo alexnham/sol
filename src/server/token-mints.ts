@@ -545,7 +545,7 @@ function validateMetadataFields(name: string, symbol: string, metadataUri = "", 
   return { name: cleanName, symbol: cleanSymbol, metadataUri: cleanUri, imageUrl: cleanImage };
 }
 
-async function submitTokenInstructions(
+export async function submitTokenInstructions(
   rpcUrl: string,
   version: 0 | 1,
   feePayer: KeyPairSigner,

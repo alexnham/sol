@@ -103,6 +103,40 @@ npm run smoke:token-mint
 The selected wallet must exist in Keygen, have devnet SOL, and `HELIUS_API_KEY` must be configured
 in `src/.env`.
 
+## Create a custom liquidity pool
+
+The **Liquidity** tab talks to the included constant-product AMM in
+`programs/custom-amm`. It can atomically initialize and seed a pool, add or remove proportional
+liquidity, and perform exact-input swaps. Pools have deterministic PDAs for their state, authority,
+LP mint, and token vaults. LP shares use a classic SPL mint; pool assets can be classic SPL tokens
+or the metadata-only Token-2022 mints created by this workbench. Token-2022 transfer-fee, transfer-
+hook, confidential-transfer, and other behavioral extensions are intentionally outside this first
+version.
+
+The AMM is devnet-only in the API and is **experimental, not audited**. Build and deploy it before
+using the tab:
+
+```bash
+cd programs/custom-amm
+cargo test
+cargo build-sbf
+solana config set --url devnet
+solana program deploy target/deploy/custom_amm.so \
+  --program-id target/deploy/custom_amm-keypair.json
+```
+
+The configured program address is `HwtbuEdcs3i8Y1pugfH8MTvzxvqwUUYNjE96QW5NFy3j`. The generated
+deployment keypair is intentionally ignored by Git; back it up securely before cleaning `target/`
+if you need to preserve upgrade authority. Pool creation requires two tracked tokens and a managed
+wallet that already owns both assets. Native SOL is not an SPL token account, so use the canonical
+wrapped-SOL mint when a SOL pair is needed; automatic wrap/unwrap is not included yet.
+
+The first deposit sets the opening price and reserves a permanent virtual minimum of 1,000 LP base
+units. Later deposits consume only the largest proportional pair within the submitted maxima, so an
+imbalanced input does not silently donate its excess. Swap quotes use `x × y = k`, deduct the pool's
+basis-point fee, and apply the chosen slippage floor on-chain. Public pool metadata is recorded
+atomically in `generated-keys/liquidity-pools.json` after confirmation.
+
 ## Run with Docker
 
 The production container builds the Vite client and serves both the UI and API from port `8787`. Secrets are supplied only at runtime and are excluded from the image build context.

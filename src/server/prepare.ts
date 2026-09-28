@@ -35,6 +35,7 @@ const TIP_ACCOUNTS = [
   "9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta",
   "5VY91ws6B2hMmBFRsXkoAAdsPHBJwRfBht4DXox3xkwn",
 ];
+const SIMULATION_BLOCKHASH = "11111111111111111111111111111111";
 
 interface LatestBlockhash {
   value: { blockhash: string; lastValidBlockHeight: number };
@@ -102,32 +103,30 @@ export async function prepareTransactions(
   const feePayer = getFeePayer(plan);
   const declaredSigners = plugin.requiredSigners({ plan, network: input.network }).map(String);
   const requiredSigners = [...new Set([...declaredSigners, feePayer])];
-  const latest = await rpcCall<LatestBlockhash>(rpcUrl, "getLatestBlockhash", [
-    { commitment: "confirmed" },
-  ]);
-  const balances = await fetchBalances(rpcUrl, [...new Set([...requiredSigners, ...wallets(plan)])]);
-  validateTransferBalances(plan, feePayer, balances);
   const tipAccount = delivery.requiresTipAccount ? selectTipAccount() : undefined;
-  const allAddressLookupTables = input.transactionVersion === 0
-    ? await fetchUsefulLookupTables(
-        rpcUrl,
-        plan.addressLookupTables ?? [],
-        [...wallets(plan), ...(tipAccount ? [tipAccount] : [])].filter(
-          (wallet) => !requiredSigners.includes(wallet),
-        ),
-      )
-    : {};
-
-  const provisionalQuote = await delivery.quote({
-    network: input.network,
-    preset: input.preset,
-    transactionVersion: input.transactionVersion,
-    computeUnitLimit: 1_000,
-    recommendedMicroLamports: 0,
-    signerCount: requiredSigners.length,
-    transferLamports: getTransferTotal(plan),
-  });
-  const common = {
+  const [balances, allAddressLookupTables, provisionalQuote] = await Promise.all([
+    fetchBalances(rpcUrl, [...new Set([...requiredSigners, ...wallets(plan)])]),
+    input.transactionVersion === 0
+      ? fetchUsefulLookupTables(
+          rpcUrl,
+          plan.addressLookupTables ?? [],
+          [...wallets(plan), ...(tipAccount ? [tipAccount] : [])].filter(
+            (wallet) => !requiredSigners.includes(wallet),
+          ),
+        )
+      : Promise.resolve({}),
+    delivery.quote({
+      network: input.network,
+      preset: input.preset,
+      transactionVersion: input.transactionVersion,
+      computeUnitLimit: 1_000,
+      recommendedMicroLamports: 0,
+      signerCount: requiredSigners.length,
+      transferLamports: getTransferTotal(plan),
+    }),
+  ]);
+  validateTransferBalances(plan, feePayer, balances);
+  const simulationCommon: PreparationCommon = {
     network: input.network,
     preset: input.preset,
     transactionVersion: input.transactionVersion,
@@ -135,26 +134,37 @@ export async function prepareTransactions(
     normalizedAlias,
     feePayer,
     requiredSigners,
-    recentBlockhash: latest.value.blockhash,
-    lastValidBlockHeight: latest.value.lastValidBlockHeight.toString(),
+    recentBlockhash: SIMULATION_BLOCKHASH,
+    lastValidBlockHeight: "0",
     tipAccount,
     balances,
-    expiresAtBlockHeight: latest.value.lastValidBlockHeight.toString(),
+    expiresAtBlockHeight: "0",
     distributorProgramId,
   };
 
   const plans = usesDistributor || usesV1SystemShare
     ? await findLargestValidShareBatches(
         plan as SharePlan,
-        common,
+        simulationCommon,
         allAddressLookupTables,
         provisionalQuote,
         rpcUrl,
       )
-    : [{ plan, ...(await simulatePlan(plan, common, allAddressLookupTables, provisionalQuote, rpcUrl)) }];
+    : [{ plan, ...(await simulatePlan(plan, simulationCommon, allAddressLookupTables, provisionalQuote, rpcUrl)) }];
 
-  const stored: StoredPreparation[] = [];
-  for (const item of plans) {
+  // Candidate simulations replace their blockhash at the RPC. Fetch the real
+  // shared blockhash only after the slow batch search has completed.
+  const latest = await rpcCall<LatestBlockhash>(rpcUrl, "getLatestBlockhash", [
+    { commitment: "confirmed" },
+  ]);
+  const common: PreparationCommon = {
+    ...simulationCommon,
+    recentBlockhash: latest.value.blockhash,
+    lastValidBlockHeight: latest.value.lastValidBlockHeight.toString(),
+    expiresAtBlockHeight: latest.value.lastValidBlockHeight.toString(),
+  };
+
+  const stored = await Promise.all(plans.map(async (item): Promise<StoredPreparation> => {
     const recommendedMicroLamports = input.preset === "economy" || input.preset === "custom"
       ? 0
       : await fetchPriorityFee(rpcUrl, wallets(item.plan));
@@ -193,11 +203,11 @@ export async function prepareTransactions(
       ...preparation,
       transactionSizeBytes: getTransactionSize(transaction),
     };
-    stored.push({
+    return {
       preparation: finalPreparation,
       messageBase64: Buffer.from(transaction.messageBytes).toString("base64"),
-    });
-  }
+    };
+  }));
 
   validateAggregateBalances(plan, feePayer, balances, stored.map(({ preparation }) => preparation));
   return stored;
@@ -238,33 +248,73 @@ async function findLargestValidShareBatches(
   provisionalQuote: Omit<TransactionQuote, "transactionCount">,
   rpcUrl: string,
 ): Promise<Array<{ plan: SharePlan; units: number; loadedAccountsDataSize?: number }>> {
-  const batches: Array<{ plan: SharePlan; units: number; loadedAccountsDataSize?: number }> = [];
-  let offset = 0;
+  const first = await findLargestValidShareBatch(
+    plan,
+    common,
+    lookupTables,
+    provisionalQuote,
+    rpcUrl,
+  );
+  const batchSize = first.plan.receivers.length;
+  if (batchSize === plan.receivers.length) return [first];
 
-  while (offset < plan.receivers.length) {
-    let low = 1;
-    let high = plan.receivers.length - offset;
-    let best: { plan: SharePlan; units: number; loadedAccountsDataSize?: number } | null = null;
-    let firstFailure: Error | null = null;
-
-    while (low <= high) {
-      const count = Math.floor((low + high) / 2);
-      const candidate = { ...plan, receivers: plan.receivers.slice(offset, offset + count) };
-      try {
-        const estimate = await simulatePlan(candidate, common, lookupTables, provisionalQuote, rpcUrl);
-        best = { plan: candidate, ...estimate };
-        low = count + 1;
-      } catch (reason) {
-        firstFailure = reason instanceof Error ? reason : new Error(String(reason));
-        high = count - 1;
-      }
-    }
-
-    if (!best) throw firstFailure ?? new Error("One recipient cannot fit in a transaction");
-    batches.push(best);
-    offset += best.plan.receivers.length;
+  const remainingPlans: SharePlan[] = [];
+  for (let offset = batchSize; offset < plan.receivers.length; offset += batchSize) {
+    remainingPlans.push({
+      ...plan,
+      receivers: plan.receivers.slice(offset, offset + batchSize),
+    });
   }
-  return batches;
+
+  const remainingBatches = await Promise.all(remainingPlans.map(async (candidate) => {
+    try {
+      return [{
+        plan: candidate,
+        ...(await simulatePlan(candidate, common, lookupTables, provisionalQuote, rpcUrl)),
+      }];
+    } catch {
+      // A different ALT/account layout can make a later chunk larger than the
+      // first one. Repartition only that chunk while other chunks continue.
+      return findLargestValidShareBatches(
+        candidate,
+        common,
+        lookupTables,
+        provisionalQuote,
+        rpcUrl,
+      );
+    }
+  }));
+
+  return [first, ...remainingBatches.flat()];
+}
+
+async function findLargestValidShareBatch(
+  plan: SharePlan,
+  common: PreparationCommon,
+  lookupTables: Record<string, string[]>,
+  provisionalQuote: Omit<TransactionQuote, "transactionCount">,
+  rpcUrl: string,
+): Promise<{ plan: SharePlan; units: number; loadedAccountsDataSize?: number }> {
+  let low = 1;
+  let high = plan.receivers.length;
+  let best: { plan: SharePlan; units: number; loadedAccountsDataSize?: number } | null = null;
+  let firstFailure: Error | null = null;
+
+  while (low <= high) {
+    const count = Math.floor((low + high) / 2);
+    const candidate = { ...plan, receivers: plan.receivers.slice(0, count) };
+    try {
+      const estimate = await simulatePlan(candidate, common, lookupTables, provisionalQuote, rpcUrl);
+      best = { plan: candidate, ...estimate };
+      low = count + 1;
+    } catch (reason) {
+      firstFailure = reason instanceof Error ? reason : new Error(String(reason));
+      high = count - 1;
+    }
+  }
+
+  if (!best) throw firstFailure ?? new Error("One recipient cannot fit in a transaction");
+  return best;
 }
 
 async function simulatePlan(
@@ -324,12 +374,15 @@ function selectTipAccount(): string {
 async function fetchBalances(rpcUrl: string, addresses: string[]): Promise<Record<string, string>> {
   const uniqueAddresses = [...new Set(addresses)];
   uniqueAddresses.forEach((wallet) => address(wallet));
-  const entries: Array<readonly [string, string]> = [];
+  const batches: string[][] = [];
 
   // Solana RPC permits up to 100 addresses per getMultipleAccounts request. A single batch
   // replaces the previous one-request-per-wallet burst for every valid v0 transaction.
   for (let offset = 0; offset < uniqueAddresses.length; offset += 100) {
-    const batch = uniqueAddresses.slice(offset, offset + 100);
+    batches.push(uniqueAddresses.slice(offset, offset + 100));
+  }
+
+  const entries = (await Promise.all(batches.map(async (batch) => {
     const response = await rpcCall<MultipleAccountsResult>(rpcUrl, "getMultipleAccounts", [
       batch,
       { commitment: "confirmed", encoding: "base64", dataSlice: { offset: 0, length: 0 } },
@@ -337,10 +390,10 @@ async function fetchBalances(rpcUrl: string, addresses: string[]): Promise<Recor
     if (response.value.length !== batch.length) {
       throw new Error("RPC returned an incomplete balance batch");
     }
-    response.value.forEach((account, index) => {
-      entries.push([batch[index]!, String(account?.lamports ?? 0)] as const);
-    });
-  }
+    return response.value.map(
+      (account, index) => [batch[index]!, String(account?.lamports ?? 0)] as const,
+    );
+  }))).flat();
   return Object.fromEntries(entries);
 }
 

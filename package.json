@@ -38,6 +38,7 @@
     "@solana-workbench/delivery-fast": "*",
     "@solana-workbench/delivery-max": "*",
     "@solana-workbench/delivery-sdk": "*",
+    "@solana-workbench/custom-amm": "*",
     "@solana-workbench/transaction-v1": "*",
     "@solana/addresses": "^8.3.0",
     "@solana/kit": "^8.3.0",

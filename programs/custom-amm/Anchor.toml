@@ -1,0 +1,16 @@
+[toolchain]
+anchor_version = "1.0.2"
+solana_version = "4.2.2"
+
+[features]
+seeds = false
+
+[programs.localnet]
+custom_amm = "HwtbuEdcs3i8Y1pugfH8MTvzxvqwUUYNjE96QW5NFy3j"
+
+[programs.devnet]
+custom_amm = "HwtbuEdcs3i8Y1pugfH8MTvzxvqwUUYNjE96QW5NFy3j"
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id.json"

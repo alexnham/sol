@@ -7,7 +7,7 @@ import {
   solToLamports,
 } from "../shared/schema";
 
-const SOURCE = "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE";
+const SOURCE = "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ";
 const DESTINATION = "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ";
 
 describe("transfer plan schema", () => {
