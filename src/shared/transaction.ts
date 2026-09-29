@@ -128,6 +128,32 @@ export async function signPreparedTransaction(
   return signed;
 }
 
+export async function signPreparedTransactionInParallel(
+  transaction: Transaction,
+  signerAddresses: readonly string[],
+  provider: SignerProvider,
+  onProgress?: SignerProgressCallback,
+): Promise<Transaction> {
+  if (signerAddresses.length === 0) return transaction;
+  const originalMessage = Uint8Array.from(transaction.messageBytes);
+  signerAddresses.forEach((signerAddress) => onProgress?.(signerAddress, "signing"));
+  try {
+    const signers = await Promise.all(signerAddresses.map((signerAddress) =>
+      provider.getSigner(address(signerAddress)),
+    ));
+    const signed = await partiallySignTransactionWithSigners(signers, transaction);
+    if (!equalBytes(originalMessage, signed.messageBytes)) {
+      throw new Error("A signer attempted to modify the transaction message");
+    }
+    signerAddresses.forEach((signerAddress) => onProgress?.(signerAddress, "signed"));
+    return signed;
+  } catch (reason) {
+    const message = reason instanceof Error ? reason.message : "Signature request failed";
+    signerAddresses.forEach((signerAddress) => onProgress?.(signerAddress, "failed", message));
+    throw reason;
+  }
+}
+
 export function encodeSignedTransaction(transaction: Transaction): string {
   return getBase64EncodedWireTransaction(transaction);
 }

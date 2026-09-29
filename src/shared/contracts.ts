@@ -26,6 +26,7 @@ export type {
 
 export type TransferType = "share" | "consolidation";
 export type TransactionVersion = 0 | 1;
+export const CONSOLIDATION_SIGNATURE_LIMITS: Record<TransactionVersion, number> = { 0: 9, 1: 12 };
 
 export interface WalletAddress {
   address: string;
@@ -141,6 +142,8 @@ export interface PrepareRequest {
   preset: DeliveryPreset;
   transactionVersion: TransactionVersion;
   pluginId?: string;
+  /** Total unique signatures allowed in each consolidation transaction. */
+  signaturesPerTransaction?: number;
 }
 
 export interface SubmitRequest {

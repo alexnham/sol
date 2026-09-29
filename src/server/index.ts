@@ -23,6 +23,8 @@ import { createTokenMint, listTokenMints, manageTokenMint, validateTokenMintRequ
 import type { CreateTokenMintRequest, ManageTokenMintRequest } from "../shared/token-mints";
 import { createLiquidityPool, listLiquidityPools, manageLiquidityPool } from "./liquidity";
 import type { CreateLiquidityPoolRequest, ManageLiquidityPoolRequest } from "../shared/liquidity";
+import { createAirshipDrop, createTokenCollection, decompressAirshipTokens, getAirshipCompressedBalances, getAirshipDrop, getTokenCollection, listAirshipTokens, previewTokenCollection } from "./airship";
+import type { CreateAirshipDropRequest, CreateTokenCollectionRequest, DecompressAirshipTokensRequest, PreviewTokenCollectionRequest } from "../shared/airship";
 
 const directory = fileURLToPath(new URL(".", import.meta.url));
 dotenv.config({ path: resolve(directory, "../.env") });
@@ -177,6 +179,94 @@ app.post("/api/liquidity-pools/manage", async (request, response, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.get("/api/airship/tokens", async (request, response, next) => {
+  try {
+    const network = request.query.network;
+    const owner = request.query.owner;
+    if (network !== "devnet" && network !== "mainnet") throw new Error("Network must be devnet or mainnet");
+    if (typeof owner !== "string") throw new Error("A managed wallet is required");
+    await getVaultSigner(owner);
+    response.json({ tokens: await listAirshipTokens(getRpcUrl(network), owner) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/airship/compressed-balances", async (request, response, next) => {
+  try {
+    const network = request.query.network;
+    const owner = request.query.owner;
+    if (network !== "devnet" && network !== "mainnet") throw new Error("Network must be devnet or mainnet");
+    if (typeof owner !== "string") throw new Error("A recipient address is required");
+    response.json(await getAirshipCompressedBalances(getRpcUrl(network), owner));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/airship/drops", async (request, response, next) => {
+  try {
+    const body = request.body as CreateAirshipDropRequest;
+    if (body.network !== "devnet" && body.network !== "mainnet") throw new Error("Network must be devnet or mainnet");
+    if (typeof body.sender !== "string" || typeof body.mint !== "string") throw new Error("Sender and mint are required");
+    if (typeof body.amountPerRecipient !== "string") throw new Error("Amount per recipient is required");
+    response.status(202).json(await createAirshipDrop(
+      getRpcUrl(body.network),
+      body,
+      await getVaultSigner(body.sender),
+    ));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/airship/decompress", async (request, response, next) => {
+  try {
+    const body = request.body as DecompressAirshipTokensRequest;
+    if (body.network !== "devnet" && body.network !== "mainnet") throw new Error("Network must be devnet or mainnet");
+    if (typeof body.owner !== "string" || typeof body.mint !== "string") throw new Error("Owner and mint are required");
+    if (typeof body.amount !== "string") throw new Error("Decompression amount is required");
+    response.json(await decompressAirshipTokens(
+      getRpcUrl(body.network),
+      body,
+      await getVaultSigner(body.owner),
+    ));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/airship/drops/:id", (request, response, next) => {
+  try {
+    response.json(getAirshipDrop(request.params.id));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/airship/collections/preview", async (request, response, next) => {
+  try {
+    const body = request.body as PreviewTokenCollectionRequest;
+    if (body.network !== "devnet" && body.network !== "mainnet") throw new Error("Network must be devnet or mainnet");
+    if (typeof body.destination !== "string" || typeof body.mint !== "string" || !Array.isArray(body.sources)) throw new Error("Destination, mint, and sources are required");
+    await Promise.all([getVaultSigner(body.destination), ...body.sources.map((source) => getVaultSigner(source.owner))]);
+    response.json(await previewTokenCollection(getRpcUrl(body.network), body));
+  } catch (error) { next(error); }
+});
+
+app.post("/api/airship/collections", async (request, response, next) => {
+  try {
+    const body = request.body as CreateTokenCollectionRequest;
+    if (body.network !== "devnet" && body.network !== "mainnet") throw new Error("Network must be devnet or mainnet");
+    response.status(202).json(await createTokenCollection(getRpcUrl(body.network), body, getVaultSigner));
+  } catch (error) { next(error); }
+});
+
+app.get("/api/airship/collections/:id", (request, response, next) => {
+  try { response.json(getTokenCollection(request.params.id)); }
+  catch (error) { next(error); }
 });
 
 app.post("/api/address-lookup-tables", async (request, response, next) => {

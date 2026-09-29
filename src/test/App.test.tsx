@@ -1,8 +1,16 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import App from "../client/App";
+import App, { isBlockhashFailure } from "../client/App";
+import type { Preparation } from "../shared/contracts";
 
 describe("workbench UI", () => {
+  it("only retries failures caused by a missing or expired blockhash", () => {
+    expect(isBlockhashFailure(new Error("Blockhash not found"))).toBe(true);
+    expect(isBlockhashFailure(new Error("The prepared blockhash expired; prepare and sign again"))).toBe(true);
+    expect(isBlockhashFailure(new Error("Transaction abc blockhash expired before confirmation"))).toBe(false);
+    expect(isBlockhashFailure(new Error("Insufficient funds"))).toBe(false);
+  });
+
   it("shows one transaction and disables Sender routes on devnet", () => {
     render(<App />);
     expect(document.querySelector(".one-tx")).toHaveTextContent("1 transaction");
@@ -12,29 +20,77 @@ describe("workbench UI", () => {
     expect(screen.getByRole("button", { name: "Prepare & send on devnet" })).toBeEnabled();
   });
 
+  it("switches a failed prepared transaction to Prepare again", async () => {
+    const sender = "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ";
+    let prepareCalls = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.endsWith("/api/prepare")) {
+        prepareCalls += 1;
+        const request = JSON.parse(String(init?.body)) as { plan: Preparation["normalizedPlan"] };
+        return { ok: true, json: async () => ({ preparations: [{
+          preparationId: `prepared-${prepareCalls}`,
+          network: "devnet",
+          preset: "economy",
+          transactionVersion: 1,
+          pluginId: "native-sol-transfer",
+          normalizedPlan: request.plan,
+          normalizedAlias: false,
+          feePayer: sender,
+          requiredSigners: [sender],
+          recentBlockhash: "11111111111111111111111111111111",
+          lastValidBlockHeight: "100",
+          computeUnitLimit: 1_000,
+          loadedAccountsDataSizeLimit: 1_000,
+          microLamportsPerComputeUnit: 0,
+          transactionSizeBytes: 300,
+          quote: { transactionCount: 1, transferLamports: "2000000", baseFeeLamports: "5000", priorityFeeLamports: "0", senderTipLamports: "0", totalFeeLamports: "5000", speed: "standard" },
+          balances: { [sender]: "1000000000" },
+          expiresAtBlockHeight: "100",
+        }] }) } as Response;
+      }
+      const body = path.endsWith("/api/keypairs")
+        ? { keypairs: [] }
+        : path.endsWith("/api/address-lookup-tables")
+          ? { addressLookupTables: [] }
+          : { transfer: [{ id: "native-sol-transfer", label: "Native SOL transfer" }], delivery: [] };
+      return { ok: true, json: async () => body } as Response;
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Prepare live quote" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Sign and send on devnet" }));
+
+    const prepareAgain = await screen.findByRole("button", { name: "Prepare again" });
+    fireEvent.click(prepareAgain);
+    expect(await screen.findByRole("button", { name: "Sign and send on devnet" })).toBeEnabled();
+    expect(prepareCalls).toBe(2);
+  });
+
   it("switches between v0 and v1 transaction formats", () => {
     render(<App />);
     const v0 = screen.getByRole("button", { name: "v0" });
     const v1 = screen.getByRole("button", { name: "v1" });
-    expect(v0).toHaveClass("active");
-    fireEvent.click(v1);
     expect(v1).toHaveClass("active");
     expect(screen.getByText("Larger v1 transactions with direct System transfers.")).toBeInTheDocument();
+    fireEvent.click(v0);
+    expect(v0).toHaveClass("active");
+    expect(screen.getByText("ALT-compressed distributor transactions.")).toBeInTheDocument();
   });
 
   it("shows a plain-language transaction breakdown for the current plan", () => {
     render(<App />);
 
     expect(screen.getByRole("heading", { name: "Transaction breakdown" })).toBeInTheDocument();
-    expect(screen.getByText("v0 message")).toBeInTheDocument();
-    expect(screen.getByText("Distribute SOL")).toBeInTheDocument();
-    expect(screen.getByText("0.002 SOL")).toBeInTheDocument();
-    expect(screen.getByText("One program call fans out to 2 recipients")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "v1" }));
     expect(screen.getByText("v1 message")).toBeInTheDocument();
     expect(screen.getByText("2 SOL transfers")).toBeInTheDocument();
+    expect(screen.getByText("0.002 SOL")).toBeInTheDocument();
     expect(screen.getByText("SystemProgram")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "v0" }));
+    expect(screen.getByText("v0 message")).toBeInTheDocument();
+    expect(screen.getByText("Distribute SOL")).toBeInTheDocument();
+    expect(screen.getByText("One program call fans out to 2 recipients")).toBeInTheDocument();
   });
 
   it("loads valid share and consolidation demo templates", () => {
@@ -55,6 +111,24 @@ describe("workbench UI", () => {
       plugin: "native-sol-transfer",
     });
     expect(screen.getByRole("heading", { name: "Share flow" })).toBeInTheDocument();
+  });
+
+  it("configures consolidation signatures per transaction up to the format limit", () => {
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Demo template"), { target: { value: "consolidation" } });
+
+    const input = screen.getByLabelText("Signatures per transaction") as HTMLInputElement;
+    expect(input).toHaveValue(12);
+    expect(input).toHaveAttribute("max", "12");
+    expect(screen.getByText(/v1 allows up to 12/)).toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: "1" } });
+    expect(input).toHaveValue(1);
+    expect(screen.getByText("2 transactions estimated · v1 allows up to 12")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "v0" }));
+    expect(input).toHaveAttribute("max", "9");
+    expect(screen.getByText(/v0 allows up to 9/)).toBeInTheDocument();
   });
 
   it("flips senders and receivers while preserving wallet amounts and plan options", () => {
@@ -243,8 +317,101 @@ describe("workbench UI", () => {
     fireEvent.click(screen.getByRole("button", { name: "Liquidity" }));
     expect(screen.getByRole("heading", { name: "Liquidity desk" })).toBeInTheDocument();
     expect(await screen.findByRole("option", { name: /T0/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create pool + seed reserves" })).toBeEnabled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create pool + seed reserves" })).toBeEnabled());
     expect(screen.getByText("No tracked pools")).toBeInTheDocument();
+  });
+
+  it("opens Airdrop with AirShip and standard delivery choices", async () => {
+    const authority = "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ";
+    const mint = "Cas5qTBtAr6kPFt1LRW431JkYzqXm2Z49XMD5xAa3wuQ";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      const body = path.endsWith("/api/keypairs")
+        ? { keypairs: [{ address: authority, file: "wallets.txt", createdAt: "2026-09-27T00:00:00.000Z" }] }
+        : path.startsWith("/api/airship/tokens?")
+          ? { tokens: [{ mint, name: "Fleet Token", symbol: "FLEET", decimals: 6, balanceBaseUnits: "25000000", tokenProgram: "classic", supported: true }] }
+          : path.endsWith("/api/address-lookup-tables")
+            ? { addressLookupTables: [] }
+            : { transfer: [{ id: "native-sol-transfer", label: "Native SOL transfer" }], delivery: [] };
+      return { ok: true, json: async () => body } as Response;
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Airdrop" }));
+
+    expect(screen.getByRole("heading", { name: "Airdrop tokens at any scale" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: /FLEET · 25 available/ })).toBeInTheDocument();
+    expect(screen.getByText("2 destinations")).toBeInTheDocument();
+    expect(screen.getByText("Recipients receive compressed tokens")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("radio", { name: /Normal airdrop/ }));
+    expect(screen.getByText("Recipients receive standard SPL tokens")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Recipient address")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Launch standard airdrop on devnet" })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/private|secret/i)).not.toBeInTheDocument();
+  });
+
+  it("scans and displays a recipient's compressed token balances", async () => {
+    const authority = "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ";
+    const recipient = "D1xjHUW4no9Yazh41nGcg5LLjupFXdFQnxer5ggWbcMA";
+    const mint = "EcC5EofwYE8Rc2Xx9ireNMRCRTRVF8JvpQZBtQNxbA4f";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      const body = path.endsWith("/api/keypairs")
+        ? { keypairs: [{ address: authority, file: "wallets.txt", createdAt: "2026-09-27T00:00:00.000Z" }] }
+        : path.startsWith("/api/airship/tokens?")
+          ? { tokens: [{ mint, name: "Fleet Token", symbol: "FLEET", decimals: 6, balanceBaseUnits: "25000000", tokenProgram: "classic", supported: true }] }
+          : path.startsWith("/api/airship/compressed-balances?")
+            ? { owner: recipient, accountCount: 2, balances: [{ mint, decimals: 6, balanceBaseUnits: "2000000", accountCount: 2 }] }
+            : path.endsWith("/api/address-lookup-tables")
+              ? { addressLookupTables: [] }
+              : { transfer: [{ id: "native-sol-transfer", label: "Native SOL transfer" }], delivery: [] };
+      return { ok: true, json: async () => body } as Response;
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Airdrop" }));
+    await screen.findByRole("option", { name: /FLEET/ });
+    fireEvent.change(screen.getByLabelText("Recipient address"), { target: { value: recipient } });
+    fireEvent.click(screen.getByRole("button", { name: "Scan balance" }));
+
+    expect(await screen.findByText("2 compressed accounts")).toBeInTheDocument();
+    expect(screen.getByText("2", { selector: ".airship-balance-list b" })).toBeInTheDocument();
+    expect(screen.getByText("FLEET", { selector: ".airship-balance-list strong" })).toBeInTheDocument();
+  });
+
+  it("decompresses a managed wallet's compressed tokens into its token account", async () => {
+    const authority = "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ";
+    const mint = "EcC5EofwYE8Rc2Xx9ireNMRCRTRVF8JvpQZBtQNxbA4f";
+    const destination = "Cas5qTBtAr6kPFt1LRW431JkYzqXm2Z49XMD5xAa3wuQ";
+    let submittedBody: Record<string, unknown> | undefined;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = String(input);
+      const body = path.endsWith("/api/keypairs")
+        ? { keypairs: [{ address: authority, file: "wallets.txt", createdAt: "2026-09-27T00:00:00.000Z" }] }
+        : path.startsWith("/api/airship/tokens?")
+          ? { tokens: [{ mint, name: "Fleet Token", symbol: "FLEET", decimals: 6, balanceBaseUnits: "0", tokenProgram: "classic", supported: true }] }
+          : path.startsWith("/api/airship/compressed-balances?")
+            ? { owner: authority, accountCount: 2, balances: [{ mint, decimals: 6, balanceBaseUnits: "2000000", accountCount: 2 }] }
+            : path === "/api/airship/decompress"
+              ? (() => {
+                  submittedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+                  return { network: "devnet", owner: authority, mint, amountBaseUnits: "1000000", destinationTokenAccount: destination, signature: "decompress-signature" };
+                })()
+              : path.endsWith("/api/address-lookup-tables")
+                ? { addressLookupTables: [] }
+                : { transfer: [{ id: "native-sol-transfer", label: "Native SOL transfer" }], delivery: [] };
+      return { ok: true, json: async () => body } as Response;
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Airdrop" }));
+    await screen.findByRole("option", { name: /FLEET/ });
+    fireEvent.click(screen.getByRole("button", { name: "Use managed sender" }));
+    fireEvent.click(screen.getByRole("button", { name: "Scan balance" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Decompress to token account" }));
+
+    expect(await screen.findByRole("link", { name: "View transaction ↗" })).toHaveAttribute("href", expect.stringContaining("decompress-signature"));
+    expect(submittedBody).toMatchObject({ network: "devnet", owner: authority, mint, amount: "1", mainnetConfirmed: true });
   });
 
   it("presents CLI how-to recipes and links back to the visual tools", () => {

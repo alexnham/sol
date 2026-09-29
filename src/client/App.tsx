@@ -9,12 +9,15 @@ import type {
   TransferPlan,
   PluginCatalog,
   LookupTableSharePlanInput,
+  ConsolidationPlan,
 } from "../shared/contracts";
+import { CONSOLIDATION_SIGNATURE_LIMITS } from "../shared/contracts";
 import { getTransferTotal, lamportsToSol, parseTransferPlanInput, PlanValidationError } from "../shared/schema";
 import {
   buildPreparedTransaction,
   encodeSignedTransaction,
   signPreparedTransaction,
+  signPreparedTransactionInParallel,
   transactionSize,
 } from "../shared/transaction";
 import {
@@ -35,6 +38,7 @@ import { createVaultSignerProvider } from "./vault-signer";
 import { MintingTab } from "./MintingTab";
 import { GuideTab } from "./GuideTab";
 import { LiquidityTab } from "./LiquidityTab";
+import { AirshipTab } from "./AirshipTab";
 
 const SHARE_SAMPLE = `{
   "type": "share",
@@ -133,11 +137,12 @@ const PRESETS: Array<{
 
 type Stage = "idle" | "preparing" | "ready" | "signing" | "submitting" | "confirmed" | "failed";
 type SignerUiStatus = "waiting" | "signing" | "signed" | "failed";
-type AppTab = "workbench" | "keygen" | "minting" | "liquidity" | "guide";
+type AppTab = "workbench" | "keygen" | "minting" | "airship" | "liquidity" | "guide";
 
 const FALLBACK_SOURCE = "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE";
 const FALLBACK_DESTINATION = "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ";
 const KEYGEN_PAGE_SIZE = 25;
+const MAX_BLOCKHASH_RETRIES = 2;
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<AppTab>("workbench");
@@ -145,6 +150,7 @@ export default function App() {
   const [network, setNetwork] = useState<Network>("devnet");
   const [preset, setPreset] = useState<DeliveryPreset>("economy");
   const [transactionVersion, setTransactionVersion] = useState<TransactionVersion>(1);
+  const [consolidationSignatures, setConsolidationSignatures] = useState(CONSOLIDATION_SIGNATURE_LIMITS[1]);
   const [preparations, setPreparations] = useState<Preparation[]>([]);
   const [results, setResults] = useState<SubmissionResult[]>([]);
   const [stage, setStage] = useState<Stage>("idle");
@@ -167,6 +173,13 @@ export default function App() {
   const jsonLineCount = json.split("\n").length;
   const jsonIsLarge = jsonLineCount > 40 || json.length > 4_000;
   const editorExpanded = editorExpandedOverride ?? !jsonIsLarge;
+  const consolidationSignatureLimit = Math.min(
+    consolidationSignatures,
+    CONSOLIDATION_SIGNATURE_LIMITS[transactionVersion],
+  );
+  const consolidationTransactionEstimate = plan?.type === "consolidation"
+    ? estimateConsolidationTransactions(plan, consolidationSignatureLimit)
+    : 0;
 
   useEffect(() => {
     let active = true;
@@ -298,6 +311,9 @@ export default function App() {
         preset,
         parsed.plan?.plugin ?? parsed.lookupPlan?.plugin ?? pluginId,
         transactionVersion,
+        parsed.plan?.type === "consolidation"
+          ? consolidationSignatureLimit
+          : undefined,
       );
       setPreparations(next);
       setSignerStatuses(
@@ -351,59 +367,75 @@ export default function App() {
       return;
     }
     try {
-      setStage("signing");
       setSignerStatuses(
         Object.fromEntries(requiredSigners.map((signer) => [signer, "waiting"])),
       );
-      const preparedBlockhash = activePreparations[0]?.recentBlockhash;
-      if (activePreparations.some((item) => item.recentBlockhash !== preparedBlockhash)) {
-        throw new Error("Prepared batches do not share one recent blockhash; prepare them again");
-      }
+      let pending = activePreparations;
+      let blockhashRetry = 0;
+      const completed: SubmissionResult[] = [];
 
-      // Finish every signature request before broadcasting anything. This keeps a
-      // slow signer or confirmation poll from delaying the remaining batches.
-      const signedTransactions = await Promise.all(activePreparations.map(async (item) => {
-        const vaultProvider = createVaultSignerProvider(item.preparationId);
-        const provider = externalProvider
-          ? {
-              id: "managed-and-external-signers",
-              getSigner: (signerAddress: Parameters<typeof externalProvider.getSigner>[0]) =>
-                managedAddresses.has(String(signerAddress))
-                  ? vaultProvider.getSigner(signerAddress)
-                  : externalProvider.getSigner(signerAddress),
-            }
-          : vaultProvider;
-        const transaction = await buildPreparedTransaction(item);
-        const signed = await signPreparedTransaction(
-          transaction,
-          item.requiredSigners,
-          provider,
-          (signerAddress, status) => {
-            setSignerStatuses((current) => ({ ...current, [signerAddress]: status }));
-          },
-        );
-        return encodeSignedTransaction(signed);
-      }));
+      while (pending.length > 0) {
+        setStage("signing");
+        const signedTransactions = await Promise.all(pending.map(async (item) => {
+          const vaultProvider = createVaultSignerProvider(item.preparationId);
+          const transaction = await buildPreparedTransaction(item);
+          const managedSigners = item.requiredSigners.filter((signer) => managedAddresses.has(signer));
+          const externalSigners = item.requiredSigners.filter((signer) => !managedAddresses.has(signer));
+          let signed = await signPreparedTransactionInParallel(
+            transaction,
+            managedSigners,
+            vaultProvider,
+            (signerAddress, status) => {
+              setSignerStatuses((current) => ({ ...current, [signerAddress]: status }));
+            },
+          );
+          if (externalSigners.length > 0) {
+            signed = await signPreparedTransaction(
+              signed,
+              externalSigners,
+              externalProvider!,
+              (signerAddress, status) => {
+                setSignerStatuses((current) => ({ ...current, [signerAddress]: status }));
+              },
+            );
+          }
+          return encodeSignedTransaction(signed);
+        }));
 
-      setStage("submitting");
-      const settledSubmissions = await Promise.allSettled(
-        activePreparations.map((item, index) =>
-          submitTransfer(item.preparationId, signedTransactions[index]!),
-        ),
-      );
-      const submissions = settledSubmissions.flatMap((submission) =>
-        submission.status === "fulfilled" ? [submission.value] : [],
-      );
-      setResults(submissions);
-      const failedSubmissions = settledSubmissions.filter(
-        (submission): submission is PromiseRejectedResult => submission.status === "rejected",
-      );
-      if (failedSubmissions.length > 0) {
-        const firstReason = failedSubmissions[0]!.reason;
-        const detail = firstReason instanceof Error ? firstReason.message : String(firstReason);
-        throw new Error(
-          `${failedSubmissions.length} of ${activePreparations.length} transactions failed: ${detail}`,
+        setStage("submitting");
+        const settled = await Promise.allSettled(
+          pending.map((item, index) => submitTransfer(item.preparationId, signedTransactions[index]!)),
         );
+        const retryPlans: Preparation[] = [];
+        const terminalFailures: unknown[] = [];
+        settled.forEach((submission, index) => {
+          if (submission.status === "fulfilled") completed.push(submission.value);
+          else if (isBlockhashFailure(submission.reason)) retryPlans.push(pending[index]!);
+          else terminalFailures.push(submission.reason);
+        });
+        setResults([...completed]);
+
+        if (terminalFailures.length > 0) {
+          const detail = errorMessage(terminalFailures[0]);
+          throw new Error(`${terminalFailures.length} transaction${terminalFailures.length === 1 ? "" : "s"} failed: ${detail}`);
+        }
+        if (retryPlans.length === 0) break;
+        if (blockhashRetry >= MAX_BLOCKHASH_RETRIES) {
+          throw new Error(`${retryPlans.length} transaction${retryPlans.length === 1 ? "" : "s"} still failed after ${MAX_BLOCKHASH_RETRIES} fresh-blockhash retries`);
+        }
+
+        blockhashRetry += 1;
+        setStage("preparing");
+        const refreshed = await Promise.all(retryPlans.map((item) => prepareTransfer(
+          item.normalizedPlan,
+          item.network,
+          item.preset,
+          item.pluginId,
+          item.transactionVersion,
+          item.requiredSigners.length,
+        )));
+        pending = refreshed.flat();
+        if (pending.length === 0) throw new Error("Fresh-blockhash preparation returned no transactions");
       }
       setStage("confirmed");
     } catch (reason) {
@@ -423,7 +455,7 @@ export default function App() {
           <span className="mark" aria-hidden="true"><i /><i /><i /></span>
           <div>
             <h1>Solana workbench</h1>
-            <p>{activeTab === "guide" ? "Practical recipes for tokens, keys, and transactions." : activeTab === "minting" ? "Create and manage SPL Token mints." : activeTab === "liquidity" ? "Open markets and manage custom AMM liquidity." : transactionVersion === 0
+            <p>{activeTab === "guide" ? "Practical recipes for tokens, keys, and transactions." : activeTab === "minting" ? "Create and manage SPL Token mints." : activeTab === "airship" ? "Distribute tokens with AirShip or a standard SPL airdrop." : activeTab === "liquidity" ? "Open markets and manage custom AMM liquidity." : transactionVersion === 0
               ? "ALT-compressed distributor transactions."
               : "Larger v1 transactions with direct System transfers."}</p>
           </div>
@@ -433,6 +465,7 @@ export default function App() {
             <button type="button" className={activeTab === "workbench" ? "active" : ""} onClick={() => setActiveTab("workbench")}>Workbench</button>
             <button type="button" className={activeTab === "keygen" ? "active" : ""} onClick={() => setActiveTab("keygen")}>Keygen <span>{vaultKeys.length}</span></button>
             <button type="button" className={activeTab === "minting" ? "active" : ""} onClick={() => setActiveTab("minting")}>Minting</button>
+            <button type="button" className={activeTab === "airship" ? "active" : ""} onClick={() => setActiveTab("airship")}>Airdrop</button>
             <button type="button" className={activeTab === "liquidity" ? "active" : ""} onClick={() => setActiveTab("liquidity")}>Liquidity</button>
             <button type="button" className={activeTab === "guide" ? "active" : ""} onClick={() => setActiveTab("guide")}>Tokens</button>
           </nav>
@@ -455,6 +488,7 @@ export default function App() {
                 className={transactionVersion === value ? "active" : ""}
                 onClick={() => {
                   setTransactionVersion(value);
+                  setConsolidationSignatures((current) => Math.min(current, CONSOLIDATION_SIGNATURE_LIMITS[value]));
                   invalidate();
                 }}
                 type="button"
@@ -614,6 +648,32 @@ export default function App() {
               <h3>Delivery route</h3>
               <span>Priority fee capped at 0.0001 SOL</span>
             </div>
+            {plan?.type === "consolidation" && (
+              <div className="consolidation-batch-config">
+                <div>
+                  <strong>Signatures per transaction</strong>
+                  <small>
+                    {consolidationTransactionEstimate} transaction{consolidationTransactionEstimate === 1 ? "" : "s"} estimated · v{transactionVersion} allows up to {CONSOLIDATION_SIGNATURE_LIMITS[transactionVersion]}
+                  </small>
+                </div>
+                <label>
+                  <span className="sr-only">Signatures per transaction</span>
+                  <input
+                    aria-label="Signatures per transaction"
+                    type="number"
+                    min={1}
+                    max={CONSOLIDATION_SIGNATURE_LIMITS[transactionVersion]}
+                    value={consolidationSignatureLimit}
+                    onChange={(event) => {
+                      const next = Math.max(1, Math.min(CONSOLIDATION_SIGNATURE_LIMITS[transactionVersion], Number(event.target.value) || 1));
+                      setConsolidationSignatures(next);
+                      invalidate();
+                    }}
+                  />
+                  <span>/ {CONSOLIDATION_SIGNATURE_LIMITS[transactionVersion]}</span>
+                </label>
+              </div>
+            )}
             <div className="routes">
               {PRESETS.map((item) => {
                 const disabled = network === "devnet"
@@ -691,6 +751,10 @@ export default function App() {
                   {stage === "preparing" ? "Preparing…" : `Prepare & send on ${network}`}
                 </button>
               </div>
+            ) : stage === "confirmed" || stage === "failed" || stage === "preparing" ? (
+              <button className="primary" disabled={stage === "preparing"} onClick={() => void prepare()} type="button">
+                {stage === "preparing" ? "Preparing again…" : "Prepare again"}
+              </button>
             ) : (
               <button className="primary" disabled={stage === "signing" || stage === "submitting"} onClick={() => void requestSend()} type="button">
                 {stage === "signing" ? "Collecting signatures…" : stage === "submitting" ? "Submitting…" : `Sign and send on ${network}`}
@@ -717,6 +781,8 @@ export default function App() {
           transactionVersion={transactionVersion}
           keypairs={vaultKeys}
         />
+      ) : activeTab === "airship" ? (
+        <AirshipTab network={network} keypairs={vaultKeys} />
       ) : activeTab === "liquidity" ? (
         <LiquidityTab network={network} transactionVersion={transactionVersion} keypairs={vaultKeys} />
       ) : (
@@ -1268,6 +1334,18 @@ function lookupRecipientCount(plan: LookupTableSharePlanInput | null): number {
   }, 0);
 }
 
+function estimateConsolidationTransactions(plan: ConsolidationPlan, signatureLimit: number): number {
+  let batches = 0;
+  for (let offset = 0; offset < plan.senders.length;) {
+    const candidate = plan.senders.slice(offset, offset + signatureLimit);
+    const separateFeePayer = Boolean(plan.feePayer) && !candidate.some((sender) => sender.address === plan.feePayer);
+    const senderCount = Math.max(1, signatureLimit - (separateFeePayer ? 1 : 0));
+    offset += Math.min(senderCount, plan.senders.length - offset);
+    batches += 1;
+  }
+  return batches;
+}
+
 function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
@@ -1439,6 +1517,15 @@ function parseEditor(value: string): {
 
 function shortAddress(value: string): string {
   return `${value.slice(0, 5)}…${value.slice(-5)}`;
+}
+
+export function isBlockhashFailure(reason: unknown): boolean {
+  const message = errorMessage(reason);
+  return /blockhash[^\n]*not found/i.test(message) || /prepared blockhash expired/i.test(message);
+}
+
+function errorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
 }
 
 function formatLamports(value: string): string {

@@ -8,6 +8,18 @@ import type {
 } from "../shared/contracts";
 import type { CreateTokenMintRequest, ManageTokenMintRequest, TokenMintActionResult, TrackedTokenMint } from "../shared/token-mints";
 import type { CreateLiquidityPoolRequest, LiquidityActionResult, ManageLiquidityPoolRequest, TrackedLiquidityPool } from "../shared/liquidity";
+import type {
+  AirshipCompressedBalanceReport,
+  AirshipDecompressionResult,
+  AirshipDropJob,
+  AirshipToken,
+  CreateAirshipDropRequest,
+  DecompressAirshipTokensRequest,
+  CreateTokenCollectionRequest,
+  PreviewTokenCollectionRequest,
+  TokenCollectionJob,
+  TokenCollectionPreview,
+} from "../shared/airship";
 
 export interface VaultKeyMetadata {
   address: string;
@@ -50,10 +62,11 @@ export function prepareTransfer(
   preset: DeliveryPreset,
   pluginId: string,
   transactionVersion: TransactionVersion,
+  signaturesPerTransaction?: number,
 ): Promise<Preparation[]> {
   return request<{ preparations: Preparation[] }>("/api/prepare", {
     method: "POST",
-    body: JSON.stringify({ plan, network, preset, pluginId, transactionVersion }),
+    body: JSON.stringify({ plan, network, preset, pluginId, transactionVersion, signaturesPerTransaction }),
   }).then((result) => result.preparations);
 }
 
@@ -160,4 +173,48 @@ export function createLiquidityPool(input: CreateLiquidityPoolRequest): Promise<
 
 export function manageLiquidityPool(input: ManageLiquidityPoolRequest): Promise<LiquidityActionResult> {
   return request("/api/liquidity-pools/manage", { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function fetchAirshipTokens(network: Network, owner: string): Promise<AirshipToken[]> {
+  const result = await request<{ tokens: AirshipToken[] }>(
+    `/api/airship/tokens?network=${encodeURIComponent(network)}&owner=${encodeURIComponent(owner)}`,
+    { method: "GET" },
+  );
+  return result.tokens;
+}
+
+export function createAirshipDrop(input: CreateAirshipDropRequest): Promise<AirshipDropJob> {
+  return request("/api/airship/drops", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function fetchAirshipCompressedBalances(
+  network: Network,
+  owner: string,
+): Promise<AirshipCompressedBalanceReport> {
+  return request(
+    `/api/airship/compressed-balances?network=${encodeURIComponent(network)}&owner=${encodeURIComponent(owner)}`,
+    { method: "GET" },
+  );
+}
+
+export function decompressAirshipTokens(
+  input: DecompressAirshipTokensRequest,
+): Promise<AirshipDecompressionResult> {
+  return request("/api/airship/decompress", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function fetchAirshipDrop(id: string): Promise<AirshipDropJob> {
+  return request(`/api/airship/drops/${encodeURIComponent(id)}`, { method: "GET" });
+}
+
+export function previewTokenCollection(input: PreviewTokenCollectionRequest): Promise<TokenCollectionPreview> {
+  return request("/api/airship/collections/preview", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function createTokenCollection(input: CreateTokenCollectionRequest): Promise<TokenCollectionJob> {
+  return request("/api/airship/collections", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function fetchTokenCollection(id: string): Promise<TokenCollectionJob> {
+  return request(`/api/airship/collections/${encodeURIComponent(id)}`, { method: "GET" });
 }

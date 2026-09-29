@@ -8,6 +8,7 @@ import type { Preparation, SignerProvider } from "../shared/contracts";
 import {
   buildPreparedTransaction,
   signPreparedTransaction,
+  signPreparedTransactionInParallel,
   transactionSize,
 } from "../shared/transaction";
 
@@ -69,6 +70,35 @@ describe("single transaction builder", () => {
     expect(transaction.messageBytes[0]).toBe(0x81);
     expect(signed.signatures[payer.address]).toBeDefined();
     expect(transactionSize(signed)).toBeLessThanOrEqual(4_096);
+  });
+
+  it("collects independent signatures for one consolidation transaction in parallel", async () => {
+    const first = await generateKeyPairSigner();
+    const second = await generateKeyPairSigner();
+    const receiver = await generateKeyPairSigner();
+    const preparation = consolidationPreparation(first.address, second.address, receiver.address);
+    const transaction = await buildPreparedTransaction(preparation);
+    const signers = new Map<string, TransactionPartialSigner>([
+      [first.address, first],
+      [second.address, second],
+    ]);
+    const progress: string[] = [];
+    const signed = await signPreparedTransactionInParallel(
+      transaction,
+      preparation.requiredSigners,
+      { id: "parallel-test", getSigner: async (signerAddress) => signers.get(signerAddress)! },
+      (signerAddress, status) => progress.push(`${signerAddress}:${status}`),
+    );
+
+    expect(Object.values(signed.signatures).every(Boolean)).toBe(true);
+    expect(progress.slice(0, 2)).toEqual([
+      `${first.address}:signing`,
+      `${second.address}:signing`,
+    ]);
+    expect(progress.slice(2)).toEqual([
+      `${first.address}:signed`,
+      `${second.address}:signed`,
+    ]);
   });
 
   it("rejects submission when a required signer cannot be resolved", async () => {

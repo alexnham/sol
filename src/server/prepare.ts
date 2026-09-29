@@ -12,7 +12,9 @@ import type {
   TransactionQuote,
   TransferPlan,
   SharePlan,
+  ConsolidationPlan,
 } from "../shared/contracts";
+import { CONSOLIDATION_SIGNATURE_LIMITS } from "../shared/contracts";
 import { deliveryAdapters, transferPlugins } from "../shared/plugin-registry";
 import {
   getFeePayer,
@@ -104,7 +106,7 @@ export async function prepareTransactions(
   const declaredSigners = plugin.requiredSigners({ plan, network: input.network }).map(String);
   const requiredSigners = [...new Set([...declaredSigners, feePayer])];
   const tipAccount = delivery.requiresTipAccount ? selectTipAccount() : undefined;
-  const [balances, allAddressLookupTables, provisionalQuote] = await Promise.all([
+  const [balances, allAddressLookupTables] = await Promise.all([
     fetchBalances(rpcUrl, [...new Set([...requiredSigners, ...wallets(plan)])]),
     input.transactionVersion === 0
       ? fetchUsefulLookupTables(
@@ -115,56 +117,81 @@ export async function prepareTransactions(
           ),
         )
       : Promise.resolve({}),
-    delivery.quote({
+  ]);
+  validateTransferBalances(plan, feePayer, balances);
+  const requestedSignatures = validateConsolidationSignatureLimit(input, plan);
+  const inputPlans = plan.type === "consolidation"
+    ? splitConsolidationPlan(plan, requestedSignatures)
+    : [plan];
+
+  const makeSimulationCommon = (candidatePlan: TransferPlan): PreparationCommon => {
+    const candidateFeePayer = getFeePayer(candidatePlan);
+    const candidateSigners = plugin.requiredSigners({ plan: candidatePlan, network: input.network }).map(String);
+    return {
       network: input.network,
       preset: input.preset,
       transactionVersion: input.transactionVersion,
-      computeUnitLimit: 1_000,
-      recommendedMicroLamports: 0,
-      signerCount: requiredSigners.length,
-      transferLamports: getTransferTotal(plan),
-    }),
-  ]);
-  validateTransferBalances(plan, feePayer, balances);
-  const simulationCommon: PreparationCommon = {
+      pluginId,
+      normalizedAlias,
+      feePayer: candidateFeePayer,
+      requiredSigners: [...new Set([...candidateSigners, candidateFeePayer])],
+      recentBlockhash: SIMULATION_BLOCKHASH,
+      lastValidBlockHeight: "0",
+      tipAccount,
+      balances,
+      expiresAtBlockHeight: "0",
+      distributorProgramId,
+    };
+  };
+
+  const simulationCommon = makeSimulationCommon(plan);
+  const provisionalQuote = await delivery.quote({
     network: input.network,
     preset: input.preset,
     transactionVersion: input.transactionVersion,
-    pluginId,
-    normalizedAlias,
-    feePayer,
-    requiredSigners,
-    recentBlockhash: SIMULATION_BLOCKHASH,
-    lastValidBlockHeight: "0",
-    tipAccount,
-    balances,
-    expiresAtBlockHeight: "0",
-    distributorProgramId,
-  };
-
+    computeUnitLimit: 1_000,
+    recommendedMicroLamports: 0,
+    signerCount: simulationCommon.requiredSigners.length,
+    transferLamports: getTransferTotal(plan),
+  });
   const plans = usesDistributor || usesV1SystemShare
-    ? await findLargestValidShareBatches(
+    ? (await findLargestValidShareBatches(
         plan as SharePlan,
         simulationCommon,
         allAddressLookupTables,
         provisionalQuote,
         rpcUrl,
-      )
-    : [{ plan, ...(await simulatePlan(plan, simulationCommon, allAddressLookupTables, provisionalQuote, rpcUrl)) }];
+      )).map((item) => ({ ...item, common: simulationCommon }))
+    : await Promise.all(inputPlans.map(async (candidatePlan) => {
+        const common = makeSimulationCommon(candidatePlan);
+        const candidateQuote = await delivery.quote({
+          network: input.network,
+          preset: input.preset,
+          transactionVersion: input.transactionVersion,
+          computeUnitLimit: 1_000,
+          recommendedMicroLamports: 0,
+          signerCount: common.requiredSigners.length,
+          transferLamports: getTransferTotal(candidatePlan),
+        });
+        return {
+          plan: candidatePlan,
+          common,
+          ...(await simulatePlan(candidatePlan, common, allAddressLookupTables, candidateQuote, rpcUrl)),
+        };
+      }));
 
   // Candidate simulations replace their blockhash at the RPC. Fetch the real
   // shared blockhash only after the slow batch search has completed.
   const latest = await rpcCall<LatestBlockhash>(rpcUrl, "getLatestBlockhash", [
     { commitment: "confirmed" },
   ]);
-  const common: PreparationCommon = {
-    ...simulationCommon,
-    recentBlockhash: latest.value.blockhash,
-    lastValidBlockHeight: latest.value.lastValidBlockHeight.toString(),
-    expiresAtBlockHeight: latest.value.lastValidBlockHeight.toString(),
-  };
-
   const stored = await Promise.all(plans.map(async (item): Promise<StoredPreparation> => {
+    const common: PreparationCommon = {
+      ...item.common,
+      recentBlockhash: latest.value.blockhash,
+      lastValidBlockHeight: latest.value.lastValidBlockHeight.toString(),
+      expiresAtBlockHeight: latest.value.lastValidBlockHeight.toString(),
+    };
     const recommendedMicroLamports = input.preset === "economy" || input.preset === "custom"
       ? 0
       : await fetchPriorityFee(rpcUrl, wallets(item.plan));
@@ -178,7 +205,7 @@ export async function prepareTransactions(
       transactionVersion: input.transactionVersion,
       computeUnitLimit,
       recommendedMicroLamports,
-      signerCount: requiredSigners.length,
+      signerCount: common.requiredSigners.length,
       transferLamports: getTransferTotal(item.plan),
     });
     const quote: TransactionQuote = {
@@ -188,7 +215,7 @@ export async function prepareTransactions(
     const preparation = makePreparation(
       item.plan,
       common,
-      selectBatchLookupTables(allAddressLookupTables, item.plan, requiredSigners, tipAccount),
+      selectBatchLookupTables(allAddressLookupTables, item.plan, common.requiredSigners, tipAccount),
       quote,
       computeUnitLimit,
       quoteRate(quoteWithoutCount, computeUnitLimit),
@@ -209,7 +236,7 @@ export async function prepareTransactions(
     };
   }));
 
-  validateAggregateBalances(plan, feePayer, balances, stored.map(({ preparation }) => preparation));
+  validateAggregateBalances(plan, balances, stored.map(({ preparation }) => preparation));
   return stored;
 }
 
@@ -363,6 +390,34 @@ function validateTransactionVersion(value: unknown): asserts value is 0 | 1 {
   if (value !== 0 && value !== 1) throw new Error("Transaction version must be 0 or 1");
 }
 
+function validateConsolidationSignatureLimit(input: PrepareRequest, plan: TransferPlan): number {
+  const maximum = CONSOLIDATION_SIGNATURE_LIMITS[input.transactionVersion];
+  if (plan.type !== "consolidation") return maximum;
+  const value = input.signaturesPerTransaction ?? maximum;
+  if (!Number.isInteger(value) || value < 1 || value > maximum) {
+    throw new Error(`Signatures per transaction must be an integer from 1 to ${maximum} for v${input.transactionVersion}`);
+  }
+  return value;
+}
+
+export function splitConsolidationPlan(plan: ConsolidationPlan, signatureLimit: number): ConsolidationPlan[] {
+  const batches: ConsolidationPlan[] = [];
+  for (let offset = 0; offset < plan.senders.length;) {
+    let senderCount = signatureLimit;
+    if (plan.feePayer) {
+      const fullCandidate = plan.senders.slice(offset, offset + signatureLimit);
+      if (!fullCandidate.some((sender) => sender.address === plan.feePayer)) senderCount -= 1;
+    }
+    if (senderCount < 1) {
+      throw new Error("At least 2 signatures per transaction are required when a separate fee payer signs each batch");
+    }
+    const senders = plan.senders.slice(offset, offset + senderCount);
+    batches.push({ ...plan, senders });
+    offset += senders.length;
+  }
+  return batches;
+}
+
 function wallets(plan: TransferPlan): string[] {
   return [...plan.senders, ...plan.receivers].map((wallet) => wallet.address);
 }
@@ -455,21 +510,21 @@ function validateTransferBalances(
 
 function validateAggregateBalances(
   plan: TransferPlan,
-  feePayer: string,
   balances: Record<string, string>,
   preparations: readonly Preparation[],
 ): void {
-  const feeTotal = preparations.reduce(
-    (total, preparation) => total + BigInt(preparation.quote.totalFeeLamports),
-    0n,
-  );
   const required = new Map<string, bigint>();
   if (plan.type === "share") {
     required.set(plan.senders[0].address, getTransferTotal(plan));
   } else {
     for (const sender of plan.senders) required.set(sender.address, solToLamports(sender.amountSol));
   }
-  required.set(feePayer, (required.get(feePayer) ?? 0n) + feeTotal);
+  for (const preparation of preparations) {
+    required.set(
+      preparation.feePayer,
+      (required.get(preparation.feePayer) ?? 0n) + BigInt(preparation.quote.totalFeeLamports),
+    );
+  }
 
   for (const [wallet, needed] of required) {
     const available = BigInt(balances[wallet] ?? "0");

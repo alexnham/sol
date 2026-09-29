@@ -103,6 +103,23 @@ npm run smoke:token-mint
 The selected wallet must exist in Keygen, have devnet SOL, and `HELIUS_API_KEY` must be configured
 in `src/.env`.
 
+## Distribute tokens with AirShip
+
+The **AirShip** tab integrates Helius AirShip's ZK-compressed token distribution flow. Select a
+managed sender, choose one of its classic SPL or supported Token-2022 assets, set an exact amount
+per recipient, and paste one base58 address per line. The workbench validates duplicates and token
+balance before starting, sends up to 15 recipients in each transaction, and tracks every signature
+through confirmed commitment.
+
+AirShip reuses the existing `HELIUS_API_KEY` from `src/.env`; no additional browser-visible RPC
+credential is needed. The key must belong to a Helius project with DAS and ZK Compression access.
+Private keys remain in the local managed vault. RPC reads, ATA creation, lookup-table compression,
+transaction assembly, signing, submission, and confirmation use Solana Kit. Light Protocol's
+official TypeScript package still emits Web3.js-shaped compression instructions, so a narrow server
+adapter converts those instructions to Kit immediately; no Web3 signer or transaction is created.
+Recipients receive compressed tokens, which require a compatible wallet or later decompression to
+standard token accounts. Mainnet launches require an explicit confirmation.
+
 ## Create a custom liquidity pool
 
 The **Liquidity** tab talks to the included constant-product AMM in
