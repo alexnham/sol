@@ -65,10 +65,10 @@ import {
   buildV1TransactionMessage,
 } from "@solana-workbench/transaction-v1";
 import { sendRpc, waitForConfirmation, type Network } from "@solana-workbench/delivery-sdk";
-import type { CreateTokenMintRequest, ManageTokenMintRequest, StoredTokenMint, TokenMintActionResult, TrackedTokenMint } from "../shared/token-mints";
-import { decimalAmountToBaseUnits } from "../shared/token-mints";
-import { rpcCall } from "./rpc";
-import { listStoredTokenMints, recordTokenMint, updateTokenMint } from "./token-mint-registry";
+import type { CreateTokenMintRequest, ManageTokenMintRequest, StoredTokenMint, TokenMintActionResult, TrackedTokenMint } from "../../../shared/token-mints";
+import { decimalAmountToBaseUnits } from "../../../shared/token-mints";
+import { rpcCall } from "../../infrastructure/rpc";
+import { listStoredTokenMints, recordTokenMint, updateTokenMint } from "./registry";
 
 interface LatestBlockhash {
   value: { blockhash: string; lastValidBlockHeight: number };

@@ -35,10 +35,10 @@ import {
 } from "./api";
 import { getSignerProvider } from "./signer-provider";
 import { createVaultSignerProvider } from "./vault-signer";
-import { MintingTab } from "./MintingTab";
-import { GuideTab } from "./GuideTab";
-import { LiquidityTab } from "./LiquidityTab";
-import { AirshipTab } from "./AirshipTab";
+import { AirshipTab } from "./features/airship";
+import { GuideTab } from "./features/guide";
+import { LiquidityTab } from "./features/liquidity";
+import { MintingTab } from "./features/minting";
 
 const SHARE_SAMPLE = `{
   "type": "share",
@@ -166,6 +166,8 @@ export default function App() {
   const [vaultBusy, setVaultBusy] = useState(false);
   const [vaultError, setVaultError] = useState<string | null>(null);
   const [editorExpandedOverride, setEditorExpandedOverride] = useState<boolean | null>(null);
+  const [copiedWorkbenchTransactions, setCopiedWorkbenchTransactions] = useState(false);
+  const [airdropRecipients, setAirdropRecipients] = useState<string[]>([]);
 
   const parsed = useMemo(() => parseEditor(json), [json]);
   const preparation = preparations[0] ?? null;
@@ -278,6 +280,13 @@ export default function App() {
     setActiveTab("workbench");
   }
 
+  function useVaultKeysForAirdrop(addresses: string[]) {
+    const selected = [...new Set(addresses)];
+    if (selected.length === 0) return;
+    setAirdropRecipients(selected);
+    setActiveTab("airship");
+  }
+
   function flipTransferDirection() {
     if (!plan) return;
     invalidate(JSON.stringify(flipTransferPlan(plan), null, 2));
@@ -287,6 +296,7 @@ export default function App() {
     if (nextJson !== undefined) setJson(nextJson);
     setPreparations([]);
     setResults([]);
+    setCopiedWorkbenchTransactions(false);
     setError(null);
     setStage("idle");
     setSignerStatuses({});
@@ -304,6 +314,7 @@ export default function App() {
     setStage("preparing");
     setError(null);
     setResults([]);
+    setCopiedWorkbenchTransactions(false);
     try {
       const next = await prepareTransfer(
         parsed.raw,
@@ -720,7 +731,7 @@ export default function App() {
                 <strong id="submission-results-title">
                   {results.length} transaction{results.length === 1 ? "" : "s"} submitted
                 </strong>
-                <span>{results.filter((result) => result.status === "confirmed").length} confirmed</span>
+                <div><span>{results.filter((result) => result.status === "confirmed").length} confirmed</span><button className="secondary" type="button" onClick={() => { void copyLines(results.map((result) => result.signature)).then(() => setCopiedWorkbenchTransactions(true)).catch(() => setError("Could not access the clipboard")); }}>{copiedWorkbenchTransactions ? "Copied" : "Copy all transactions"}</button></div>
               </div>
               <ol>
                 {results.map((result, index) => (
@@ -773,6 +784,7 @@ export default function App() {
           onGenerate={generateKeys}
           onRefresh={refreshVault}
           onUse={useVaultKeys}
+          onUseForAirdrop={useVaultKeysForAirdrop}
           onUseLookupTable={useLookupTable}
         />
       ) : activeTab === "minting" ? (
@@ -782,7 +794,7 @@ export default function App() {
           keypairs={vaultKeys}
         />
       ) : activeTab === "airship" ? (
-        <AirshipTab network={network} keypairs={vaultKeys} />
+        <AirshipTab network={network} keypairs={vaultKeys} recipientAddresses={airdropRecipients} />
       ) : activeTab === "liquidity" ? (
         <LiquidityTab network={network} transactionVersion={transactionVersion} keypairs={vaultKeys} />
       ) : (
@@ -816,6 +828,7 @@ function KeygenPanel({
   onGenerate,
   onRefresh,
   onUse,
+  onUseForAirdrop,
   onUseLookupTable,
 }: {
   keypairs: VaultKeyMetadata[];
@@ -826,6 +839,7 @@ function KeygenPanel({
   onGenerate(count: number): Promise<void>;
   onRefresh(): Promise<void>;
   onUse(addresses: string[], role: "sources" | "destinations"): void;
+  onUseForAirdrop(addresses: string[]): void;
   onUseLookupTable(address: string): void;
 }) {
   const [count, setCount] = useState(1);
@@ -1053,6 +1067,7 @@ function KeygenPanel({
             </button>
           )}
           <button className="secondary" type="button" onClick={() => void onRefresh()}>Refresh files</button>
+          <button className="secondary airdrop-recipient-action" type="button" disabled={selected.length === 0} onClick={() => onUseForAirdrop(selected)}>Use as airdrop recipients</button>
           <button className="secondary" type="button" disabled={selected.length === 0} onClick={() => onUse(selected, "destinations")}>Use as destinations</button>
           <button className="primary" type="button" disabled={selected.length === 0} onClick={() => onUse(selected, "sources")}>Use as sources</button>
         </div>
@@ -1564,4 +1579,8 @@ function signerStatusLabel(status: SignerUiStatus): string {
 function formatVaultDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "Imported file" : date.toLocaleString();
+}
+
+async function copyLines(values: readonly string[]): Promise<void> {
+  await navigator.clipboard.writeText(values.join("\n"));
 }

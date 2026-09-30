@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Network, TransactionVersion } from "../shared/contracts";
-import { formatBaseUnits } from "../shared/token-mints";
-import { createTokenMint, fetchTokenMints, manageTokenMint, type VaultKeyMetadata } from "./api";
-import type { ManageTokenMintRequest, TrackedTokenMint } from "../shared/token-mints";
+import type { Network, TransactionVersion } from "../../../shared/contracts";
+import { formatBaseUnits } from "../../../shared/token-mints";
+import { createTokenMint, fetchTokenMints, manageTokenMint, type VaultKeyMetadata } from "../../api";
+import type { ManageTokenMintRequest, TrackedTokenMint } from "../../../shared/token-mints";
 
 const SAME_AUTHORITY = "__same__";
 const NO_AUTHORITY = "__none__";

@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { listStoredTokenMints, recordTokenMint, updateTokenMint } from "../server/token-mint-registry";
+import { listStoredTokenMints, recordTokenMint, updateTokenMint } from "../server/features/token-mints/registry";
 
 const temporaryDirectories: string[] = [];
 const entry = {

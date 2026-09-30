@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Network, TransactionVersion } from "../shared/contracts";
-import type { TrackedLiquidityPool } from "../shared/liquidity";
-import { formatBaseUnits, type TrackedTokenMint } from "../shared/token-mints";
-import { createLiquidityPool, fetchLiquidityPools, fetchTokenMints, manageLiquidityPool, type VaultKeyMetadata } from "./api";
+import type { Network, TransactionVersion } from "../../../shared/contracts";
+import type { TrackedLiquidityPool } from "../../../shared/liquidity";
+import { formatBaseUnits, type TrackedTokenMint } from "../../../shared/token-mints";
+import { createLiquidityPool, fetchLiquidityPools, fetchTokenMints, manageLiquidityPool, type VaultKeyMetadata } from "../../api";
 
 export function LiquidityTab({ network, transactionVersion, keypairs }: {
   network: Network;

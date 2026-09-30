@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { TransactionInstruction, PublicKey } from "@solana/web3.js";
 import { AccountRole, generateKeyPairSigner } from "@solana/kit";
-import { toKitInstruction } from "../server/light-kit-adapter";
+import { toKitInstruction } from "../server/infrastructure/light-kit-adapter";
 
 describe("Light Protocol Kit adapter", () => {
   it("preserves account roles, signer capability, program address, and data", async () => {

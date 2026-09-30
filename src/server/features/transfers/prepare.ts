@@ -13,23 +13,23 @@ import type {
   TransferPlan,
   SharePlan,
   ConsolidationPlan,
-} from "../shared/contracts";
-import { CONSOLIDATION_SIGNATURE_LIMITS } from "../shared/contracts";
-import { deliveryAdapters, transferPlugins } from "../shared/plugin-registry";
+} from "../../../shared/contracts";
+import { CONSOLIDATION_SIGNATURE_LIMITS } from "../../../shared/contracts";
+import { deliveryAdapters, transferPlugins } from "../../../shared/plugin-registry";
 import {
   getFeePayer,
   getTransferTotal,
   parseTransferPlanInput,
   solToLamports,
-} from "../shared/schema";
-import { buildPreparedTransaction } from "../shared/transaction";
+} from "../../../shared/schema";
+import { buildPreparedTransaction } from "../../../shared/transaction";
 import { quoteRate } from "./delivery";
-import { rpcCall } from "./rpc";
+import { rpcCall } from "../../infrastructure/rpc";
 import {
   fetchUsefulLookupTables,
   resolveLookupTableReceivers,
   selectUsefulLookupTables,
-} from "./address-lookup-tables";
+} from "../address-lookup-tables/selection";
 
 const TIP_ACCOUNTS = [
   "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE",

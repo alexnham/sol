@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { expandLookupTableReceivers } from "../server/address-lookup-tables";
+import { expandLookupTableReceivers } from "../server/features/address-lookup-tables/selection";
 import { parseLookupTableSharePlan } from "../shared/schema";
 
 const SOURCE = "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE";

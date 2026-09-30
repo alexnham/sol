@@ -10,7 +10,7 @@ import { decimalAmountToBaseUnits, MAX_U64 } from "../shared/token-mints";
 import {
   buildTokenMintInstructions,
   buildUnsignedTokenMintTransaction,
-} from "../server/token-mints";
+} from "../server/features/token-mints/service";
 
 const LIFETIME = {
   blockhash: blockhash("11111111111111111111111111111111"),

@@ -20,12 +20,12 @@ import {
   type AmmTokenPair,
 } from "@solana-workbench/custom-amm";
 import type { Network } from "@solana-workbench/delivery-sdk";
-import type { CreateLiquidityPoolRequest, LiquidityActionResult, ManageLiquidityPoolRequest, StoredLiquidityPool, TrackedLiquidityPool } from "../shared/liquidity";
-import { decimalAmountToBaseUnits } from "../shared/token-mints";
-import { listStoredTokenMints } from "./token-mint-registry";
-import { listStoredLiquidityPools, recordLiquidityPool } from "./liquidity-pool-registry";
-import { rpcCall } from "./rpc";
-import { submitTokenInstructions } from "./token-mints";
+import type { CreateLiquidityPoolRequest, LiquidityActionResult, ManageLiquidityPoolRequest, StoredLiquidityPool, TrackedLiquidityPool } from "../../../shared/liquidity";
+import { decimalAmountToBaseUnits } from "../../../shared/token-mints";
+import { listStoredTokenMints } from "../token-mints/registry";
+import { listStoredLiquidityPools, recordLiquidityPool } from "./registry";
+import { rpcCall } from "../../infrastructure/rpc";
+import { submitTokenInstructions } from "../token-mints/service";
 
 interface TokenBalanceResponse { value: { amount: string; decimals: number } }
 

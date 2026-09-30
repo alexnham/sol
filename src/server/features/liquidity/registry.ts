@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import type { StoredLiquidityPool } from "../shared/liquidity";
+import type { StoredLiquidityPool } from "../../../shared/liquidity";
 
 const registryFile = resolve(process.cwd(), "generated-keys", "liquidity-pools.json");
 let writeQueue = Promise.resolve();

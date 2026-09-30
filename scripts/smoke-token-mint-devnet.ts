@@ -1,7 +1,7 @@
 import * as dotenv from "dotenv";
 import { resolve } from "node:path";
-import { getVaultSigner } from "../src/server/key-vault";
-import { createTokenMint } from "../src/server/token-mints";
+import { getVaultSigner } from "../src/server/infrastructure/key-vault";
+import { createTokenMint } from "../src/server/features/token-mints";
 
 dotenv.config({ path: resolve(process.cwd(), "src/.env") });
 

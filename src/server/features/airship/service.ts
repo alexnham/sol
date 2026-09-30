@@ -49,11 +49,15 @@ import type {
   TokenCollectionJob,
   TokenCollectionPreview,
   TokenCollectionPreviewSource,
-} from "../shared/airship";
+} from "../../../shared/airship";
 
-import type { Network } from "../shared/contracts";
+import type { Network } from "../../../shared/contracts";
 
-import { rpcCall } from "./rpc";
+import { rpcCall } from "../../infrastructure/rpc";
+import { runWithConcurrency } from "./concurrency";
+import { getTokenProgramAccountsByMint } from "./program-accounts";
+
+export { getTokenProgramAccountsByMint } from "./program-accounts";
 
 import {
   getAirshipCompressInstruction,
@@ -61,7 +65,7 @@ import {
   getAirshipDecompressInstruction,
   getAirshipStateTree,
   getAirshipTokenPoolAddress,
-} from "./light-kit-adapter";
+} from "../../infrastructure/light-kit-adapter";
 
 const MAX_RECIPIENTS = 200_000;
 
@@ -70,6 +74,7 @@ const MAX_ADDRESSES_PER_INSTRUCTION = 5;
 
 const MAX_STANDARD_RECIPIENTS_PER_TRANSACTION = 10;
 const MAX_COLLECTION_SOURCES_PER_TRANSACTION = 10;
+const AIRDROP_BATCH_CONCURRENCY = 4;
 
 const COMPUTE_UNIT_LIMIT = 550_000;
 const DECOMPRESS_COMPUTE_UNIT_LIMIT = 1_000_000;
@@ -399,11 +404,16 @@ export async function previewTokenCollection(
   const [destinationTokenAccount] = tokenProgram === "classic"
     ? await findAssociatedTokenPda({ owner: destination, mint, tokenProgram: TOKEN_PROGRAM_ADDRESS })
     : await findToken2022AssociatedTokenPda({ owner: destination, mint, tokenProgram: TOKEN_2022_PROGRAM_ADDRESS });
-  const programAccounts = await rpc.getProgramAccounts(tokenProgramAddress, {
-    commitment: "confirmed",
-    encoding: "jsonParsed",
-    filters: [{ memcmp: { offset: 0n, bytes: mint as never, encoding: "base58" } }],
-  }).send();
+  const programAccounts = await getTokenProgramAccountsByMint(
+    rpcUrl,
+    String(tokenProgramAddress),
+    String(mint),
+    async () => rpc.getProgramAccounts(tokenProgramAddress, {
+      commitment: "confirmed",
+      encoding: "jsonParsed",
+      filters: [{ memcmp: { offset: 0n, bytes: mint as never, encoding: "base58" } }],
+    }).send(),
+  );
 
   const discovered = await Promise.all(programAccounts.map(async (entry) => {
     const parsed = entry.account.data as unknown as { parsed?: { info?: Record<string, unknown> } };
@@ -1084,12 +1094,11 @@ async function runAirshipDrop(
     },
   );
 
-  for (
-    let offset = 0;
-    offset < recipients.length;
-    offset +=
-      MAX_ADDRESSES_PER_TRANSACTION
-  ) {
+  await runWithConcurrency(
+    Math.ceil(recipients.length / MAX_ADDRESSES_PER_TRANSACTION),
+    AIRDROP_BATCH_CONCURRENCY,
+    async (batchIndex) => {
+    const offset = batchIndex * MAX_ADDRESSES_PER_TRANSACTION;
     const batch =
       recipients.slice(
         offset,
@@ -1164,7 +1173,8 @@ async function runAirshipDrop(
         ],
       },
     );
-  }
+    },
+  );
 
   updateJob(
     job.id,
@@ -1232,12 +1242,11 @@ async function runStandardDrop(
     },
   );
 
-  for (
-    let offset = 0;
-    offset < recipients.length;
-    offset +=
-      MAX_STANDARD_RECIPIENTS_PER_TRANSACTION
-  ) {
+  await runWithConcurrency(
+    Math.ceil(recipients.length / MAX_STANDARD_RECIPIENTS_PER_TRANSACTION),
+    AIRDROP_BATCH_CONCURRENCY,
+    async (batchIndex) => {
+    const offset = batchIndex * MAX_STANDARD_RECIPIENTS_PER_TRANSACTION;
     const instructions:
       Instruction[] = [];
 
@@ -1381,7 +1390,8 @@ async function runStandardDrop(
         ],
       },
     );
-  }
+    },
+  );
 
   updateJob(
     job.id,

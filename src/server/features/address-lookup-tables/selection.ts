@@ -4,8 +4,8 @@ import {
   fetchAddressesForLookupTables,
   type AddressesByLookupTableAddress,
 } from "@solana/kit";
-import type { LookupTableSharePlanInput, SharePlan } from "../shared/contracts";
-import { parseTransferPlan } from "../shared/schema";
+import type { LookupTableSharePlanInput, SharePlan } from "../../../shared/contracts";
+import { parseTransferPlan } from "../../../shared/schema";
 
 export async function resolveLookupTableReceivers(
   rpcUrl: string,

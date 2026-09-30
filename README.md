@@ -392,7 +392,7 @@ An opt-in signed devnet smoke test accepts a Solana CLI-compatible keypair file:
 npm run smoke:v1 -- /path/to/devnet-keypair.json
 ```
 
-`src/server/delivery.ts` only imports and registers the packages. To experiment with a route, edit its package without changing preparation, signing, or the other delivery routes. Keep its exported adapter ID stable if you want the existing UI selection to continue working.
+`src/server/features/transfers/delivery.ts` only imports and registers the packages. To experiment with a route, edit its package without changing preparation, signing, or the other delivery routes. Keep its exported adapter ID stable if you want the existing UI selection to continue working.
 
 ## Safety behavior
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectUsefulLookupTables } from "../server/address-lookup-tables";
+import { selectUsefulLookupTables } from "../server/features/address-lookup-tables/selection";
 
 describe("address lookup table selection", () => {
   it("greedily selects the fewest high-coverage tables", () => {

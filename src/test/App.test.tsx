@@ -350,6 +350,37 @@ describe("workbench UI", () => {
     expect(screen.queryByLabelText(/private|secret/i)).not.toBeInTheDocument();
   });
 
+  it("copies selected Keygen wallets into the airdrop recipient list", async () => {
+    const addresses = [
+      "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ",
+      "Cas5qTBtAr6kPFt1LRW431JkYzqXm2Z49XMD5xAa3wuQ",
+      "BApRNbirCZhPJ2uHAcesJNJCEwCz98p9o6W4f6bc4yr1",
+    ];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      const body = path.endsWith("/api/keypairs")
+        ? { keypairs: addresses.map((address) => ({ address, file: "wallets.txt", createdAt: "2026-09-27T00:00:00.000Z" })) }
+        : path.startsWith("/api/airship/tokens?")
+          ? { tokens: [] }
+          : path.endsWith("/api/address-lookup-tables")
+            ? { addressLookupTables: [] }
+            : { transfer: [{ id: "native-sol-transfer", label: "Native SOL transfer" }], delivery: [] };
+      return { ok: true, json: async () => body } as Response;
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Keygen/ }));
+    await screen.findByLabelText("Authority / fee payer");
+    const walletCheckboxes = document.querySelectorAll<HTMLInputElement>(".key-ledger input");
+    fireEvent.click(walletCheckboxes[1]!);
+    fireEvent.click(walletCheckboxes[2]!);
+    fireEvent.click(screen.getByRole("button", { name: "Use as airdrop recipients" }));
+
+    expect(screen.getByRole("heading", { name: "Airdrop tokens at any scale" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Recipient addresses")).toHaveValue(`${addresses[1]}\n${addresses[2]}`);
+    expect(screen.getByText("2 destinations")).toBeInTheDocument();
+  });
+
   it("scans and displays a recipient's compressed token balances", async () => {
     const authority = "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ";
     const recipient = "D1xjHUW4no9Yazh41nGcg5LLjupFXdFQnxer5ggWbcMA";

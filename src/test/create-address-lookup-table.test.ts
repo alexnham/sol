@@ -1,6 +1,6 @@
 import { generateKeyPairSigner } from "@solana/kit";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAddressLookupTable } from "../server/create-address-lookup-table";
+import { createAddressLookupTable } from "../server/features/address-lookup-tables/create";
 
 afterEach(() => vi.restoreAllMocks());
 

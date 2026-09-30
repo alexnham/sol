@@ -46,7 +46,6 @@ export interface StoredAddressLookupTable {
 }
 
 async function request<T>(path: string, init: RequestInit): Promise<T> {
-  console.log("test: ", path)
   const response = await fetch(path, {
     ...init,
     headers: { "Content-Type": "application/json", ...init.headers },

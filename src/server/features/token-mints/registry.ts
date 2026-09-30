@@ -2,7 +2,7 @@ import { address } from "@solana/kit";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { MAX_U64, type StoredTokenMint } from "../shared/token-mints";
+import { MAX_U64, type StoredTokenMint } from "../../../shared/token-mints";
 
 const registryFile = resolve(process.cwd(), "generated-keys", "token-mints.json");
 let registryWrite: Promise<void> = Promise.resolve();

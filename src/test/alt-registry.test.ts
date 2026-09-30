@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   listStoredAddressLookupTables,
   recordAddressLookupTable,
-} from "../server/alt-registry";
+} from "../server/features/address-lookup-tables/registry";
 
 const temporaryDirectories: string[] = [];
 

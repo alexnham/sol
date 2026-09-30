@@ -1,18 +1,28 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Network } from "../shared/contracts";
-import type { AirshipCompressedBalanceReport, AirshipDecompressionResult, AirshipDropJob, AirshipToken, TokenCollectionJob, TokenCollectionPreview } from "../shared/airship";
-import { createAirshipDrop, createTokenCollection, decompressAirshipTokens, fetchAirshipCompressedBalances, fetchAirshipDrop, fetchAirshipTokens, fetchTokenCollection, previewTokenCollection, type VaultKeyMetadata } from "./api";
+import type { Network } from "../../../shared/contracts";
+import type { AirshipCompressedBalanceReport, AirshipDecompressionResult, AirshipDropJob, AirshipToken, TokenCollectionJob, TokenCollectionPreview } from "../../../shared/airship";
+import { createAirshipDrop, createTokenCollection, decompressAirshipTokens, fetchAirshipCompressedBalances, fetchAirshipDrop, fetchAirshipTokens, fetchTokenCollection, previewTokenCollection, type VaultKeyMetadata } from "../../api";
+import {
+  airshipJobLabel,
+  explorerTransaction,
+  formatSol,
+  formatTokenUnits,
+  normalizeTokenAmount,
+  shortAddress,
+} from "./presentation";
 
 const RECIPIENT_SAMPLE = `D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ
 9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta`;
 type DeliveryMethod = "airship" | "standard";
 
-export function AirshipTab({ network, keypairs }: { network: Network; keypairs: VaultKeyMetadata[] }) {
+export function AirshipTab({ network, keypairs, recipientAddresses = [] }: { network: Network; keypairs: VaultKeyMetadata[]; recipientAddresses?: string[] }) {
   const [delivery, setDelivery] = useState<DeliveryMethod>("airship");
   const [sender, setSender] = useState("");
   const [tokens, setTokens] = useState<AirshipToken[]>([]);
   const [mint, setMint] = useState("");
-  const [recipientsText, setRecipientsText] = useState(RECIPIENT_SAMPLE);
+  const [recipientsText, setRecipientsText] = useState(() => recipientAddresses.length > 0
+    ? recipientAddresses.join("\n")
+    : RECIPIENT_SAMPLE);
   const [amount, setAmount] = useState("1");
   const [loadingTokens, setLoadingTokens] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -35,6 +45,7 @@ export function AirshipTab({ network, keypairs }: { network: Network; keypairs: 
   const [collectionJob, setCollectionJob] = useState<TokenCollectionJob | null>(null);
   const [collectionBusy, setCollectionBusy] = useState(false);
   const [collectionError, setCollectionError] = useState<string | null>(null);
+  const [copiedTransactions, setCopiedTransactions] = useState<"airdrop" | "collection" | null>(null);
 
   useEffect(() => {
     if (!sender || !keypairs.some((keypair) => keypair.address === sender)) {
@@ -121,6 +132,7 @@ export function AirshipTab({ network, keypairs }: { network: Network; keypairs: 
     setSubmitting(true);
     setError(null);
     setJob(null);
+    setCopiedTransactions(null);
     try {
       setJob(await createAirshipDrop({
         network,
@@ -208,10 +220,21 @@ export function AirshipTab({ network, keypairs }: { network: Network; keypairs: 
     const mainnetConfirmed = network !== "mainnet" || window.confirm(`Collect tokens from ${collectionSources.length} wallets and close ${selectedCollectionClosures.length} emptied accounts on mainnet?`);
     if (!mainnetConfirmed) return;
     setCollectionBusy(true); setCollectionError(null);
+    setCopiedTransactions(null);
     try {
       setCollectionJob(await createTokenCollection({ network, destination: collectionDestination, mint: collectionMint, sources: collectionPreview.sources.filter((source) => source.eligible && collectionSources.includes(source.owner)).map((source) => ({ owner: source.owner, amount: collectionAmounts[source.owner] ?? source.amount })), mainnetConfirmed }));
     } catch (reason) { setCollectionError(reason instanceof Error ? reason.message : "Could not start token collection"); }
     finally { setCollectionBusy(false); }
+  }
+
+  async function copyTransactions(kind: "airdrop" | "collection", signatures: string[]) {
+    try {
+      await navigator.clipboard.writeText(signatures.join("\n"));
+      setCopiedTransactions(kind);
+    } catch {
+      const setErrorForKind = kind === "airdrop" ? setError : setCollectionError;
+      setErrorForKind("Could not access the clipboard");
+    }
   }
 
   return (
@@ -251,7 +274,7 @@ export function AirshipTab({ network, keypairs }: { network: Network; keypairs: 
               <select value={mint} onChange={(event) => setMint(event.target.value)} disabled={loadingTokens || tokens.length === 0}>
                 {loadingTokens ? <option>Loading wallet tokens…</option> : tokens.length === 0 ? <option>No fungible tokens found</option> : tokens.map((token) => (
                   <option key={token.mint} value={token.mint} disabled={!token.supported}>
-                    {token.symbol} · {formatUnits(token.balanceBaseUnits, token.decimals)} available{token.supported ? "" : " · unsupported extension"}
+                  {token.symbol} · {formatTokenUnits(token.balanceBaseUnits, token.decimals)} available{token.supported ? "" : " · unsupported extension"}
                   </option>
                 ))}
               </select>
@@ -260,7 +283,7 @@ export function AirshipTab({ network, keypairs }: { network: Network; keypairs: 
               <div className="airship-amount"><input inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="1" /><span>{selectedToken?.symbol ?? "TOKEN"}</span></div>
             </label>
             <label>Recipient addresses <small>one base58 address per line</small>
-              <textarea value={recipientsText} onChange={(event) => setRecipientsText(event.target.value)} spellCheck={false} rows={11} />
+              <textarea aria-label="Recipient addresses" value={recipientsText} onChange={(event) => setRecipientsText(event.target.value)} spellCheck={false} rows={11} />
             </label>
           </>}
           {error && <div className="alert error-alert" role="alert"><strong>Action stopped</strong><span>{error}</span></div>}
@@ -321,7 +344,7 @@ export function AirshipTab({ network, keypairs }: { network: Network; keypairs: 
                   const knownToken = tokens.find((token) => token.mint === balance.mint);
                   return <li key={balance.mint}>
                     <div><strong>{knownToken?.symbol ?? shortAddress(balance.mint)}</strong><code title={balance.mint}>{balance.mint}</code></div>
-                    <div><b>{formatUnits(balance.balanceBaseUnits, balance.decimals)}</b><small>{balance.accountCount} compressed account{balance.accountCount === 1 ? "" : "s"}</small></div>
+                    <div><b>{formatTokenUnits(balance.balanceBaseUnits, balance.decimals)}</b><small>{balance.accountCount} compressed account{balance.accountCount === 1 ? "" : "s"}</small></div>
                   </li>;
                 })}
               </ul>
@@ -335,14 +358,14 @@ export function AirshipTab({ network, keypairs }: { network: Network; keypairs: 
                 <label>Compressed token
                   <select value={decompressMint} onChange={(event) => setDecompressMint(event.target.value)}>
                     {balanceReport.balances.map((balance) => <option key={balance.mint} value={balance.mint}>
-                      {tokens.find((token) => token.mint === balance.mint)?.symbol ?? shortAddress(balance.mint)} · {formatUnits(balance.balanceBaseUnits, balance.decimals)} available
+                      {tokens.find((token) => token.mint === balance.mint)?.symbol ?? shortAddress(balance.mint)} · {formatTokenUnits(balance.balanceBaseUnits, balance.decimals)} available
                     </option>)}
                   </select>
                 </label>
                 <label>Amount
                   <div className="airship-decompress-amount">
                     <input inputMode="decimal" value={decompressAmount} onChange={(event) => setDecompressAmount(event.target.value)} />
-                    <button type="button" onClick={() => decompressionBalance && setDecompressAmount(formatUnits(decompressionBalance.balanceBaseUnits, decompressionBalance.decimals))}>Max</button>
+                    <button type="button" onClick={() => decompressionBalance && setDecompressAmount(formatTokenUnits(decompressionBalance.balanceBaseUnits, decompressionBalance.decimals))}>Max</button>
                   </div>
                 </label>
                 <button className="primary" disabled={decompressing || !decompressMint}>
@@ -357,11 +380,11 @@ export function AirshipTab({ network, keypairs }: { network: Network; keypairs: 
           </div>}
 
           {job ? <div className={`airship-progress ${job.state}`}>
-            <div className="airship-progress-heading"><div><small>FLIGHT {job.id.slice(0, 8).toUpperCase()}</small><strong>{jobLabel(job)}</strong></div><b>{progress}%</b></div>
+            <div className="airship-progress-heading"><div><small>FLIGHT {job.id.slice(0, 8).toUpperCase()}</small><strong>{airshipJobLabel(job)}</strong></div><b>{progress}%</b></div>
             <div className="airship-progress-track"><i style={{ width: `${progress}%` }} /></div>
             <div className="airship-progress-counts"><span>{job.sentTransactions} sent</span><span>{job.confirmedTransactions} confirmed</span><span>{job.totalTransactions} total</span></div>
             {job.error && <p className="airship-job-error">{job.error}</p>}
-            {job.signatures.length > 0 && <details><summary>{job.signatures.length} transaction signature{job.signatures.length === 1 ? "" : "s"}</summary><ol>{job.signatures.map((signature) => <li key={signature}><a href={explorerTransaction(signature, job.network)} target="_blank" rel="noreferrer">{shortAddress(signature)} ↗</a></li>)}</ol></details>}
+            {job.signatures.length > 0 && <><button className="secondary airship-copy-transactions" type="button" onClick={() => void copyTransactions("airdrop", job.signatures)}>{copiedTransactions === "airdrop" ? "Copied" : "Copy all transactions"}</button><details><summary>{job.signatures.length} transaction signature{job.signatures.length === 1 ? "" : "s"}</summary><ol>{job.signatures.map((signature) => <li key={signature}><a href={explorerTransaction(signature, job.network)} target="_blank" rel="noreferrer">{shortAddress(signature)} ↗</a></li>)}</ol></details></>}
           </div> : <div className="airship-idle"><span>↗</span><strong>Ready for departure</strong><p>{delivery === "airship" ? "AirShip creates a compression pool when needed, then sends groups of 15 recipients per transaction." : "Standard delivery creates recipient token accounts when needed, then sends groups of 4 recipients per transaction."}</p></div>}
         </section>
       </div>
@@ -381,43 +404,8 @@ export function AirshipTab({ network, keypairs }: { network: Network; keypairs: 
           {collectionPreview.sources.length === 0 ? <p className="token-collection-empty">No managed canonical token accounts were found for this mint.</p> : <ul>{collectionPreview.sources.map((source) => <li key={source.tokenAccount} className={source.eligible ? "eligible" : "excluded"}>{source.eligible && <input type="checkbox" aria-label={`Select ${source.owner}`} checked={collectionSources.includes(source.owner)} onChange={(event) => setCollectionSources((current) => event.target.checked ? [...new Set([...current, source.owner])] : current.filter((owner) => owner !== source.owner))} />}<div><strong>{shortAddress(source.owner)}</strong><small>{source.eligible ? source.balanceBaseUnits === "0" ? `Empty ATA · closes and reclaims rent · ${shortAddress(source.tokenAccount)}` : `${source.balance} available${source.willClose ? " · closes account" : ""} · ${shortAddress(source.tokenAccount)}` : source.reason}</small></div>{source.eligible && <input aria-label={`Collection amount for ${source.owner}`} disabled={!collectionSources.includes(source.owner) || source.balanceBaseUnits === "0"} value={collectionAmounts[source.owner] ?? source.amount} onChange={(event) => setCollectionAmounts((current) => ({ ...current, [source.owner]: event.target.value }))} />}</li>)}</ul>}
           <button className="primary" type="button" disabled={collectionBusy || selectedCollectionSources.length === 0} onClick={() => void launchCollection()}>{collectionBusy ? "Starting…" : `Collect ${selectedCollectionSources.length} account${selectedCollectionSources.length === 1 ? "" : "s"} on ${network}`}</button>
         </div>}
-        {collectionJob && <div className={`token-collection-progress ${collectionJob.state}`}><strong>{collectionJob.confirmedTransactions} / {collectionJob.totalTransactions} transactions confirmed</strong><span>{collectionJob.closedAccounts} accounts closed · {formatSol(collectionJob.reclaimedRentLamports)} SOL reclaimed</span>{collectionJob.error && <p>{collectionJob.error}</p>}{collectionJob.signatures.map((signature) => <a key={signature} href={explorerTransaction(signature, collectionJob.network)} target="_blank" rel="noreferrer">{shortAddress(signature)} ↗</a>)}</div>}
+        {collectionJob && <div className={`token-collection-progress ${collectionJob.state}`}><strong>{collectionJob.confirmedTransactions} / {collectionJob.totalTransactions} transactions confirmed</strong><span>{collectionJob.closedAccounts} accounts closed · {formatSol(collectionJob.reclaimedRentLamports)} SOL reclaimed</span>{collectionJob.error && <p>{collectionJob.error}</p>}{collectionJob.signatures.length > 0 && <button className="secondary airship-copy-transactions" type="button" onClick={() => void copyTransactions("collection", collectionJob.signatures)}>{copiedTransactions === "collection" ? "Copied" : "Copy all transactions"}</button>}{collectionJob.signatures.map((signature) => <a key={signature} href={explorerTransaction(signature, collectionJob.network)} target="_blank" rel="noreferrer">{shortAddress(signature)} ↗</a>)}</div>}
       </section>
     </section>
   );
 }
-
-function formatUnits(value: string, decimals: number): string {
-  const padded = value.padStart(decimals + 1, "0");
-  const whole = decimals === 0 ? padded : padded.slice(0, -decimals);
-  const fraction = decimals === 0 ? "" : padded.slice(-decimals).replace(/0+$/, "");
-  return fraction ? `${whole}.${fraction}` : whole;
-}
-
-function formatSol(lamports: string): string {
-  const value = BigInt(lamports);
-  const whole = value / 1_000_000_000n;
-  const fraction = (value % 1_000_000_000n).toString().padStart(9, "0").replace(/0+$/, "");
-  return fraction ? `${whole}.${fraction}` : whole.toString();
-}
-
-function normalizeTokenAmount(value: string): string {
-  const [whole = "0", fraction = ""] = value.trim().split(".");
-  const normalizedWhole = whole.replace(/^0+(?=\d)/, "") || "0";
-  const normalizedFraction = fraction.replace(/0+$/, "");
-  return normalizedFraction ? `${normalizedWhole}.${normalizedFraction}` : normalizedWhole;
-}
-
-function jobLabel(job: AirshipDropJob): string {
-  if (job.state === "queued") return "Queued";
-  if (job.state === "preparing") return job.delivery === "airship" ? "Preparing compression pool" : "Preparing token accounts";
-  if (job.state === "sending") return job.delivery === "airship" ? "Sending compressed tokens" : "Sending standard tokens";
-  if (job.state === "confirmed") return "Distribution confirmed";
-  return "Distribution stopped";
-}
-
-function explorerTransaction(signature: string, network: Network): string {
-  return `https://explorer.solana.com/tx/${signature}${network === "devnet" ? "?cluster=devnet" : ""}`;
-}
-
-function shortAddress(value: string): string { return `${value.slice(0, 8)}…${value.slice(-8)}`; }

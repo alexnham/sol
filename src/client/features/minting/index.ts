@@ -1,0 +1,1 @@
+export { MintingTab } from "./MintingTab";

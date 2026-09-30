@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ConsolidationPlan } from "../shared/contracts";
-import { splitConsolidationPlan } from "../server/prepare";
+import { splitConsolidationPlan } from "../server/features/transfers/prepare";
 
 const receiver = "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ";
 const senders = [

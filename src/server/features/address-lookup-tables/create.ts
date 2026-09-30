@@ -17,7 +17,7 @@ import {
   getExtendLookupTableInstruction,
 } from "@solana-program/address-lookup-table";
 import { sendRpc, waitForConfirmation, type Network } from "@solana-workbench/delivery-sdk";
-import { rpcCall } from "./rpc";
+import { rpcCall } from "../../infrastructure/rpc";
 
 // With one signer serving as both authority and fee payer, create + 30 addresses
 // serializes to exactly 1,232 bytes. Adding a 31st address exceeds Solana's limit.
