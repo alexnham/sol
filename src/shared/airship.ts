@@ -82,7 +82,8 @@ export interface PreviewTokenCollectionRequest {
   network: Network;
   destination: string;
   mint: string;
-  sources: TokenCollectionSourceInput[];
+  /** Omit to select every managed canonical account discovered for the mint. */
+  sources?: TokenCollectionSourceInput[];
 }
 
 export interface TokenCollectionPreviewSource {
@@ -93,6 +94,7 @@ export interface TokenCollectionPreviewSource {
   amountBaseUnits: string;
   amount: string;
   rentLamports: string;
+  selected: boolean;
   willClose: boolean;
   eligible: boolean;
   reason?: string;
@@ -114,7 +116,8 @@ export interface TokenCollectionPreview {
   estimatedFeeLamports: string;
 }
 
-export interface CreateTokenCollectionRequest extends PreviewTokenCollectionRequest {
+export interface CreateTokenCollectionRequest extends Omit<PreviewTokenCollectionRequest, "sources"> {
+  sources: TokenCollectionSourceInput[];
   mainnetConfirmed: boolean;
 }
 

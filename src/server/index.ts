@@ -250,9 +250,10 @@ app.post("/api/airship/collections/preview", async (request, response, next) => 
   try {
     const body = request.body as PreviewTokenCollectionRequest;
     if (body.network !== "devnet" && body.network !== "mainnet") throw new Error("Network must be devnet or mainnet");
-    if (typeof body.destination !== "string" || typeof body.mint !== "string" || !Array.isArray(body.sources)) throw new Error("Destination, mint, and sources are required");
-    await Promise.all([getVaultSigner(body.destination), ...body.sources.map((source) => getVaultSigner(source.owner))]);
-    response.json(await previewTokenCollection(getRpcUrl(body.network), body));
+    if (typeof body.destination !== "string" || typeof body.mint !== "string" || (body.sources !== undefined && !Array.isArray(body.sources))) throw new Error("Destination and mint are required");
+    const managedKeys = await listVaultKeys();
+    await getVaultSigner(body.destination);
+    response.json(await previewTokenCollection(getRpcUrl(body.network), body, managedKeys.map((key) => key.address)));
   } catch (error) { next(error); }
 });
 
@@ -260,7 +261,9 @@ app.post("/api/airship/collections", async (request, response, next) => {
   try {
     const body = request.body as CreateTokenCollectionRequest;
     if (body.network !== "devnet" && body.network !== "mainnet") throw new Error("Network must be devnet or mainnet");
-    response.status(202).json(await createTokenCollection(getRpcUrl(body.network), body, getVaultSigner));
+    if (!Array.isArray(body.sources)) throw new Error("Select at least one source wallet");
+    const managedKeys = await listVaultKeys();
+    response.status(202).json(await createTokenCollection(getRpcUrl(body.network), body, getVaultSigner, managedKeys.map((key) => key.address)));
   } catch (error) { next(error); }
 });
 

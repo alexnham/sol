@@ -99,6 +99,16 @@ export function AirshipTab({ network, keypairs }: { network: Network; keypairs: 
   const progress = job && job.totalTransactions > 0
     ? Math.round((job.confirmedTransactions / job.totalTransactions) * 100)
     : 0;
+  const selectedCollectionSources = collectionPreview?.sources.filter(
+    (source) => source.eligible && collectionSources.includes(source.owner),
+  ) ?? [];
+  const selectedCollectionClosures = selectedCollectionSources.filter(
+    (source) => normalizeTokenAmount(collectionAmounts[source.owner] ?? source.amount) === normalizeTokenAmount(source.balance),
+  );
+  const selectedCollectionRent = selectedCollectionClosures.reduce(
+    (total, source) => total + BigInt(source.rentLamports),
+    0n,
+  ).toString();
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -184,8 +194,9 @@ export function AirshipTab({ network, keypairs }: { network: Network; keypairs: 
     event.preventDefault();
     setCollectionBusy(true); setCollectionError(null); setCollectionPreview(null); setCollectionJob(null);
     try {
-      const report = await previewTokenCollection({ network, destination: collectionDestination, mint: collectionMint, sources: collectionSources.map((owner) => ({ owner, amount: collectionAmounts[owner] })) });
+      const report = await previewTokenCollection({ network, destination: collectionDestination, mint: collectionMint });
       setCollectionPreview(report);
+      setCollectionSources(report.sources.filter((source) => source.eligible).map((source) => source.owner));
       setCollectionAmounts(Object.fromEntries(report.sources.filter((source) => source.eligible).map((source) => [source.owner, collectionAmounts[source.owner] ?? source.amount])));
     } catch (reason) { setCollectionError(reason instanceof Error ? reason.message : "Could not preview token collection"); }
     finally { setCollectionBusy(false); }
@@ -193,11 +204,12 @@ export function AirshipTab({ network, keypairs }: { network: Network; keypairs: 
 
   async function launchCollection() {
     if (!collectionPreview) return;
-    const mainnetConfirmed = network !== "mainnet" || window.confirm(`Collect tokens from ${collectionPreview.eligibleSourceCount} wallets and close ${collectionPreview.closeableAccountCount} emptied accounts on mainnet?`);
+    if (collectionSources.length === 0) { setCollectionError("Select at least one discovered token account"); return; }
+    const mainnetConfirmed = network !== "mainnet" || window.confirm(`Collect tokens from ${collectionSources.length} wallets and close ${selectedCollectionClosures.length} emptied accounts on mainnet?`);
     if (!mainnetConfirmed) return;
     setCollectionBusy(true); setCollectionError(null);
     try {
-      setCollectionJob(await createTokenCollection({ network, destination: collectionDestination, mint: collectionMint, sources: collectionPreview.sources.filter((source) => source.eligible).map((source) => ({ owner: source.owner, amount: collectionAmounts[source.owner] ?? source.amount })), mainnetConfirmed }));
+      setCollectionJob(await createTokenCollection({ network, destination: collectionDestination, mint: collectionMint, sources: collectionPreview.sources.filter((source) => source.eligible && collectionSources.includes(source.owner)).map((source) => ({ owner: source.owner, amount: collectionAmounts[source.owner] ?? source.amount })), mainnetConfirmed }));
     } catch (reason) { setCollectionError(reason instanceof Error ? reason.message : "Could not start token collection"); }
     finally { setCollectionBusy(false); }
   }
@@ -359,14 +371,15 @@ export function AirshipTab({ network, keypairs }: { network: Network; keypairs: 
         <form className="token-collection-config" onSubmit={loadCollectionPreview}>
           <label>Destination wallet<select value={collectionDestination} onChange={(event) => { setCollectionDestination(event.target.value); setCollectionPreview(null); }}>{keypairs.map((keypair) => <option key={keypair.address} value={keypair.address}>{keypair.address}</option>)}</select></label>
           <label>Token mint<input value={collectionMint} onChange={(event) => { setCollectionMint(event.target.value); setCollectionPreview(null); }} placeholder="Mint address" spellCheck={false} /></label>
-          <label className="token-collection-sources">Source wallets <small>managed wallets only</small><select multiple size={Math.min(7, Math.max(3, keypairs.length))} value={collectionSources} onChange={(event) => { setCollectionSources(Array.from(event.target.selectedOptions, (option) => option.value)); setCollectionPreview(null); }}>{keypairs.filter((keypair) => keypair.address !== collectionDestination).map((keypair) => <option key={keypair.address} value={keypair.address}>{keypair.address}</option>)}</select></label>
-          <div className="token-collection-actions"><button type="button" className="secondary" onClick={() => { setCollectionSources(keypairs.filter((keypair) => keypair.address !== collectionDestination).map((keypair) => keypair.address)); setCollectionPreview(null); }}>Select all sources</button><button className="primary" disabled={collectionBusy || !collectionDestination || !collectionMint || collectionSources.length === 0}>{collectionBusy ? "Scanning…" : "Preview collection"}</button></div>
+          <p className="token-collection-query-note">The scan queries the token program by mint, then keeps managed canonical accounts—including empty ATAs that can return their rent.</p>
+          <div className="token-collection-actions"><button className="primary" disabled={collectionBusy || !collectionDestination || !collectionMint}>{collectionBusy ? "Scanning…" : "Find token accounts"}</button></div>
         </form>
         {collectionError && <div className="alert error-alert" role="alert"><strong>Collection stopped</strong><span>{collectionError}</span></div>}
         {collectionPreview && <div className="token-collection-review">
-          <dl><div><dt>Eligible</dt><dd>{collectionPreview.eligibleSourceCount}</dd></div><div><dt>Accounts closing</dt><dd>{collectionPreview.closeableAccountCount}</dd></div><div><dt>Rent reclaimed</dt><dd>{formatSol(collectionPreview.reclaimedRentLamports)} SOL</dd></div><div><dt>Transactions</dt><dd>{collectionPreview.estimatedTransactions}</dd></div></dl>
-          <ul>{collectionPreview.sources.map((source) => <li key={source.owner} className={source.eligible ? "eligible" : "excluded"}><div><strong>{shortAddress(source.owner)}</strong><small>{source.eligible ? `${source.balance} available${source.willClose ? " · closes account" : ""}` : source.reason}</small></div>{source.eligible && <input aria-label={`Collection amount for ${source.owner}`} value={collectionAmounts[source.owner] ?? source.amount} onChange={(event) => { setCollectionAmounts((current) => ({ ...current, [source.owner]: event.target.value })); setCollectionPreview(null); }} />}</li>)}</ul>
-          <button className="primary" type="button" disabled={collectionBusy || collectionPreview.eligibleSourceCount === 0} onClick={() => void launchCollection()}>{collectionBusy ? "Starting…" : `Collect tokens on ${network}`}</button>
+          <dl><div><dt>Selected</dt><dd>{selectedCollectionSources.length}</dd></div><div><dt>Accounts closing</dt><dd>{selectedCollectionClosures.length}</dd></div><div><dt>Rent reclaimed</dt><dd>{formatSol(selectedCollectionRent)} SOL</dd></div><div><dt>Transactions</dt><dd>{Math.ceil(selectedCollectionSources.length / 10)}</dd></div></dl>
+          <div className="token-collection-selection-actions"><button type="button" className="secondary" onClick={() => setCollectionSources(collectionPreview.sources.filter((source) => source.eligible).map((source) => source.owner))}>Select all</button><button type="button" className="secondary" onClick={() => setCollectionSources([])}>Clear</button></div>
+          {collectionPreview.sources.length === 0 ? <p className="token-collection-empty">No managed canonical token accounts were found for this mint.</p> : <ul>{collectionPreview.sources.map((source) => <li key={source.tokenAccount} className={source.eligible ? "eligible" : "excluded"}>{source.eligible && <input type="checkbox" aria-label={`Select ${source.owner}`} checked={collectionSources.includes(source.owner)} onChange={(event) => setCollectionSources((current) => event.target.checked ? [...new Set([...current, source.owner])] : current.filter((owner) => owner !== source.owner))} />}<div><strong>{shortAddress(source.owner)}</strong><small>{source.eligible ? source.balanceBaseUnits === "0" ? `Empty ATA · closes and reclaims rent · ${shortAddress(source.tokenAccount)}` : `${source.balance} available${source.willClose ? " · closes account" : ""} · ${shortAddress(source.tokenAccount)}` : source.reason}</small></div>{source.eligible && <input aria-label={`Collection amount for ${source.owner}`} disabled={!collectionSources.includes(source.owner) || source.balanceBaseUnits === "0"} value={collectionAmounts[source.owner] ?? source.amount} onChange={(event) => setCollectionAmounts((current) => ({ ...current, [source.owner]: event.target.value }))} />}</li>)}</ul>}
+          <button className="primary" type="button" disabled={collectionBusy || selectedCollectionSources.length === 0} onClick={() => void launchCollection()}>{collectionBusy ? "Starting…" : `Collect ${selectedCollectionSources.length} account${selectedCollectionSources.length === 1 ? "" : "s"} on ${network}`}</button>
         </div>}
         {collectionJob && <div className={`token-collection-progress ${collectionJob.state}`}><strong>{collectionJob.confirmedTransactions} / {collectionJob.totalTransactions} transactions confirmed</strong><span>{collectionJob.closedAccounts} accounts closed · {formatSol(collectionJob.reclaimedRentLamports)} SOL reclaimed</span>{collectionJob.error && <p>{collectionJob.error}</p>}{collectionJob.signatures.map((signature) => <a key={signature} href={explorerTransaction(signature, collectionJob.network)} target="_blank" rel="noreferrer">{shortAddress(signature)} ↗</a>)}</div>}
       </section>
@@ -386,6 +399,13 @@ function formatSol(lamports: string): string {
   const whole = value / 1_000_000_000n;
   const fraction = (value % 1_000_000_000n).toString().padStart(9, "0").replace(/0+$/, "");
   return fraction ? `${whole}.${fraction}` : whole.toString();
+}
+
+function normalizeTokenAmount(value: string): string {
+  const [whole = "0", fraction = ""] = value.trim().split(".");
+  const normalizedWhole = whole.replace(/^0+(?=\d)/, "") || "0";
+  const normalizedFraction = fraction.replace(/0+$/, "");
+  return normalizedFraction ? `${normalizedWhole}.${normalizedFraction}` : normalizedWhole;
 }
 
 function jobLabel(job: AirshipDropJob): string {

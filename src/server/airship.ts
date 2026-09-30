@@ -6,7 +6,6 @@ import {
   createSolanaRpc,
   createTransactionMessage,
   getBase64EncodedWireTransaction,
-  isSome,
   pipe,
   setTransactionMessageConfig,
   setTransactionMessageFeePayerSigner,
@@ -23,8 +22,6 @@ import {
   getCreateAssociatedTokenIdempotentInstruction,
   getTransferCheckedInstruction,
   getCloseAccountInstruction,
-  fetchAllMaybeToken,
-  AccountState,
 } from "@solana-program/token";
 
 import {
@@ -33,8 +30,6 @@ import {
   getCreateAssociatedTokenIdempotentInstruction as getCreateToken2022AssociatedTokenIdempotentInstruction,
   getTransferCheckedInstruction as getTransferCheckedToken2022Instruction,
   getCloseAccountInstruction as getCloseToken2022AccountInstruction,
-  fetchAllMaybeToken as fetchAllMaybeToken2022,
-  AccountState as Token2022AccountState,
 } from "@solana-program/token-2022";
 
 import {
@@ -376,13 +371,18 @@ export async function getAirshipCompressedBalances(
 export async function previewTokenCollection(
   rpcUrl: string,
   request: PreviewTokenCollectionRequest,
+  managedOwnerAddresses: string[],
 ): Promise<TokenCollectionPreview> {
   const destination = address(request.destination.trim());
   const mint = address(request.mint.trim());
-  if (!Array.isArray(request.sources) || request.sources.length === 0) throw new Error("Select at least one source wallet");
-  const owners = request.sources.map((source) => address(source.owner.trim()));
-  if (new Set(owners).size !== owners.length) throw new Error("Source wallets must be unique");
-  if (owners.includes(destination)) throw new Error("The destination wallet cannot also be a source");
+  const requestedSources = request.sources?.map((source) => ({ ...source, owner: address(source.owner.trim()) }));
+  if (requestedSources && new Set(requestedSources.map((source) => source.owner)).size !== requestedSources.length) {
+    throw new Error("Source wallets must be unique");
+  }
+  if (requestedSources?.some((source) => source.owner === destination)) throw new Error("The destination wallet cannot also be a source");
+  const requestedByOwner = new Map(requestedSources?.map((source) => [source.owner, source]));
+  const selectAll = request.sources === undefined;
+  const managedOwners = new Set(managedOwnerAddresses.map((owner) => String(address(owner))));
 
   const rpc = createSolanaRpc(rpcUrl);
   const [mintInfo, supply] = await Promise.all([
@@ -396,42 +396,53 @@ export async function previewTokenCollection(
   if (!tokenProgram) throw new Error("Mint is not owned by SPL Token or Token-2022");
   const decimals = supply.value.decimals;
   const tokenProgramAddress = tokenProgram === "classic" ? TOKEN_PROGRAM_ADDRESS : TOKEN_2022_PROGRAM_ADDRESS;
-  const atas = await Promise.all(owners.map(async (owner) => {
-    const derived = tokenProgram === "classic"
-      ? await findAssociatedTokenPda({ owner, mint, tokenProgram: TOKEN_PROGRAM_ADDRESS })
-      : await findToken2022AssociatedTokenPda({ owner, mint, tokenProgram: TOKEN_2022_PROGRAM_ADDRESS });
-    return derived[0];
-  }));
   const [destinationTokenAccount] = tokenProgram === "classic"
     ? await findAssociatedTokenPda({ owner: destination, mint, tokenProgram: TOKEN_PROGRAM_ADDRESS })
     : await findToken2022AssociatedTokenPda({ owner: destination, mint, tokenProgram: TOKEN_2022_PROGRAM_ADDRESS });
-  const accounts = tokenProgram === "classic"
-    ? await fetchTokenAccountsInChunks(rpc, atas, fetchAllMaybeToken)
-    : await fetchTokenAccountsInChunks(rpc, atas, fetchAllMaybeToken2022);
+  const programAccounts = await rpc.getProgramAccounts(tokenProgramAddress, {
+    commitment: "confirmed",
+    encoding: "jsonParsed",
+    filters: [{ memcmp: { offset: 0n, bytes: mint as never, encoding: "base58" } }],
+  }).send();
 
-  const sources: TokenCollectionPreviewSource[] = request.sources.map((input, index) => {
-    const owner = owners[index]!;
-    const tokenAccount = atas[index]!;
-    const account = accounts[index];
-    if (!account?.exists) return excludedCollectionSource(owner, tokenAccount, "Associated token account was not found");
-    if (String(account.data.mint) !== mint || String(account.data.owner) !== owner) return excludedCollectionSource(owner, tokenAccount, "Token account ownership does not match");
-    if (account.data.state === AccountState.Frozen || account.data.state === Token2022AccountState.Frozen) return excludedCollectionSource(owner, tokenAccount, "Token account is frozen");
-    const balanceBaseUnits = BigInt(account.data.amount);
-    if (balanceBaseUnits === 0n) return excludedCollectionSource(owner, tokenAccount, "Token account balance is zero");
+  const discovered = await Promise.all(programAccounts.map(async (entry) => {
+    const parsed = entry.account.data as unknown as { parsed?: { info?: Record<string, unknown> } };
+    const info = parsed.parsed?.info;
+    if (!info || String(info.mint) !== mint) return null;
+    const owner = address(String(info.owner));
+    const amountValue = (info.tokenAmount as { amount?: unknown } | undefined)?.amount;
+    if (!managedOwners.has(owner) || owner === destination || typeof amountValue !== "string") return null;
+    const tokenAccount = address(String(entry.pubkey));
+    const [canonicalAta] = tokenProgram === "classic"
+      ? await findAssociatedTokenPda({ owner, mint, tokenProgram: TOKEN_PROGRAM_ADDRESS })
+      : await findToken2022AssociatedTokenPda({ owner, mint, tokenProgram: TOKEN_2022_PROGRAM_ADDRESS });
+    if (tokenAccount !== canonicalAta) return excludedCollectionSource(owner, tokenAccount, "Only the canonical associated token account can be collected");
+    const input = requestedByOwner.get(owner);
+    const selected = selectAll || input !== undefined;
+    const balanceBaseUnits = BigInt(amountValue);
+    if (String(info.state).toLowerCase() === "frozen") return { ...excludedCollectionSource(owner, tokenAccount, "Token account is frozen"), selected };
     let amountBaseUnits: bigint;
-    try { amountBaseUnits = input.amount === undefined ? balanceBaseUnits : parseTokenAmount(input.amount, decimals); }
-    catch (reason) { return excludedCollectionSource(owner, tokenAccount, reason instanceof Error ? reason.message : "Invalid amount"); }
-    if (amountBaseUnits > balanceBaseUnits) return excludedCollectionSource(owner, tokenAccount, "Requested amount exceeds the live balance");
+    try {
+      amountBaseUnits = input?.amount === undefined
+        ? balanceBaseUnits
+        : balanceBaseUnits === 0n && /^0+(?:\.0*)?$/.test(input.amount.trim())
+          ? 0n
+          : parseTokenAmount(input.amount, decimals);
+    }
+    catch (reason) { return { ...excludedCollectionSource(owner, tokenAccount, reason instanceof Error ? reason.message : "Invalid amount"), selected }; }
+    if (amountBaseUnits > balanceBaseUnits) return { ...excludedCollectionSource(owner, tokenAccount, "Requested amount exceeds the live balance"), selected };
     const willClose = amountBaseUnits === balanceBaseUnits;
-    const closeAuthority = isSome(account.data.closeAuthority) ? String(account.data.closeAuthority.value) : owner;
-    if (willClose && closeAuthority !== owner) return excludedCollectionSource(owner, tokenAccount, "Source wallet is not the close authority");
+    const closeAuthority = typeof info.closeAuthority === "string" ? info.closeAuthority : owner;
+    if (willClose && closeAuthority !== owner) return { ...excludedCollectionSource(owner, tokenAccount, "Source wallet is not the close authority"), selected };
     return {
       owner, tokenAccount, balanceBaseUnits: balanceBaseUnits.toString(), balance: formatTokenUnits(balanceBaseUnits, decimals),
       amountBaseUnits: amountBaseUnits.toString(), amount: formatTokenUnits(amountBaseUnits, decimals),
-      rentLamports: String(account.lamports), willClose, eligible: true,
+      rentLamports: String(entry.account.lamports), selected, willClose, eligible: true,
     };
-  });
-  const eligible = sources.filter((source) => source.eligible);
+  }));
+  const sources = discovered.filter((source): source is TokenCollectionPreviewSource => source !== null)
+    .sort((left, right) => left.owner.localeCompare(right.owner));
+  const eligible = sources.filter((source) => source.eligible && source.selected);
   const closable = eligible.filter((source) => source.willClose);
   const estimatedTransactions = Math.ceil(eligible.length / MAX_COLLECTION_SOURCES_PER_TRANSACTION);
   const estimatedSignatures = eligible.length + estimatedTransactions;
@@ -449,10 +460,12 @@ export async function createTokenCollection(
   rpcUrl: string,
   request: CreateTokenCollectionRequest,
   getSigner: (owner: string) => Promise<KeyPairSigner>,
+  managedOwnerAddresses: string[],
 ): Promise<TokenCollectionJob> {
   if (request.network === "mainnet" && request.mainnetConfirmed !== true) throw new Error("Mainnet token collection requires explicit confirmation");
-  const preview = await previewTokenCollection(rpcUrl, request);
-  const eligible = preview.sources.filter((source) => source.eligible);
+  if (request.sources.length === 0) throw new Error("Select at least one source wallet");
+  const preview = await previewTokenCollection(rpcUrl, request, managedOwnerAddresses);
+  const eligible = preview.sources.filter((source) => source.eligible && source.selected);
   if (eligible.length === 0) throw new Error("No eligible token accounts to collect");
   const locked = [preview.destination, ...eligible.map((source) => source.owner)];
   if (locked.some((owner) => activeSenders.has(owner))) throw new Error("A selected wallet already has an action in progress");
@@ -1398,15 +1411,18 @@ async function runTokenCollection(
   }
   updateCollectionJob(job.id, { state: "sending", totalTransactions: batches.length });
   await Promise.all(batches.map(async (batch) => {
-    const instructions: Instruction[] = [job.tokenProgram === "classic"
-      ? getCreateAssociatedTokenIdempotentInstruction({ payer: destinationSigner, ata: destinationTokenAccount, owner: destination, mint, tokenProgram: tokenProgramAddress })
-      : getCreateToken2022AssociatedTokenIdempotentInstruction({ payer: destinationSigner, ata: destinationTokenAccount, owner: destination, mint, tokenProgram: tokenProgramAddress })];
+    const instructions: Instruction[] = [];
+    if (batch.some((source) => BigInt(source.amountBaseUnits) > 0n)) {
+      instructions.push(job.tokenProgram === "classic"
+        ? getCreateAssociatedTokenIdempotentInstruction({ payer: destinationSigner, ata: destinationTokenAccount, owner: destination, mint, tokenProgram: tokenProgramAddress })
+        : getCreateToken2022AssociatedTokenIdempotentInstruction({ payer: destinationSigner, ata: destinationTokenAccount, owner: destination, mint, tokenProgram: tokenProgramAddress }));
+    }
     for (const source of batch) {
       const ownerSigner = signers.get(source.owner);
       if (!ownerSigner) throw new Error(`Signing key unavailable for ${source.owner}`);
       const sourceAccount = address(source.tokenAccount);
       const amount = BigInt(source.amountBaseUnits);
-      instructions.push(job.tokenProgram === "classic"
+      if (amount > 0n) instructions.push(job.tokenProgram === "classic"
         ? getTransferCheckedInstruction({ source: sourceAccount, mint, destination: destinationTokenAccount, authority: ownerSigner, amount, decimals: job.decimals })
         : getTransferCheckedToken2022Instruction({ source: sourceAccount, mint, destination: destinationTokenAccount, authority: ownerSigner, amount, decimals: job.decimals }));
       if (source.willClose) instructions.push(job.tokenProgram === "classic"
@@ -1567,19 +1583,7 @@ function updateCollectionJob(id: string, patch: Partial<TokenCollectionJob>): vo
 }
 
 function excludedCollectionSource(owner: Address, tokenAccount: Address, reason: string): TokenCollectionPreviewSource {
-  return { owner, tokenAccount, balanceBaseUnits: "0", balance: "0", amountBaseUnits: "0", amount: "0", rentLamports: "0", willClose: false, eligible: false, reason };
-}
-
-async function fetchTokenAccountsInChunks(
-  rpc: ReturnType<typeof createSolanaRpc>,
-  addresses: Address[],
-  fetcher: typeof fetchAllMaybeToken | typeof fetchAllMaybeToken2022,
-): Promise<any[]> {
-  const output: any[] = [];
-  for (let offset = 0; offset < addresses.length; offset += 100) {
-    output.push(...await (fetcher as any)(rpc, addresses.slice(offset, offset + 100), { commitment: "confirmed" }));
-  }
-  return output;
+  return { owner, tokenAccount, balanceBaseUnits: "0", balance: "0", amountBaseUnits: "0", amount: "0", rentLamports: "0", selected: false, willClose: false, eligible: false, reason };
 }
 
 function formatTokenUnits(value: bigint, decimals: number): string {
