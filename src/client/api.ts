@@ -20,6 +20,7 @@ import type {
   TokenCollectionJob,
   TokenCollectionPreview,
 } from "../shared/airship";
+import type { WalletPortfolioReport } from "../shared/wallet-portfolio";
 
 export interface VaultKeyMetadata {
   address: string;
@@ -86,6 +87,10 @@ export function submitTransfer(
 export async function fetchVaultKeys(): Promise<VaultKeyMetadata[]> {
   const result = await request<{ keypairs: VaultKeyMetadata[] }>("/api/keypairs", { method: "GET" });
   return result.keypairs;
+}
+
+export function fetchWalletPortfolio(network: Network): Promise<WalletPortfolioReport> {
+  return request(`/api/wallets/portfolio?network=${encodeURIComponent(network)}`, { method: "GET" });
 }
 
 export async function generateVaultKeys(count: number): Promise<VaultKeyMetadata[]> {

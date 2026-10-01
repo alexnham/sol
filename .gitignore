@@ -2,6 +2,7 @@ node_modules/
 dist/
 coverage/
 generated-keys/
+archived-keys/
 .env
 .env.*
 src/.env

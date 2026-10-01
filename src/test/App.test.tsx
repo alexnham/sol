@@ -562,4 +562,72 @@ describe("workbench UI", () => {
       expect(editor.value).toContain(tableAddress);
     });
   });
+
+  it("manually scans and caches wallet portfolios by network, then marks changed wallet sets stale", async () => {
+    const firstWallet = { address: "DzcSBpVniutt6w5pyuytxLUqJcWMh3mMawMmxaquLsbZ", file: "wallets.txt", createdAt: "2026-09-30T12:00:00.000Z" };
+    const secondWallet = { address: "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ", file: "wallets.txt", createdAt: "2026-09-30T12:00:00.000Z" };
+    let keyLoads = 0;
+    let portfolioLoads = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      let body: unknown;
+      if (path.endsWith("/api/keypairs")) {
+        keyLoads += 1;
+        body = { keypairs: keyLoads === 1 ? [firstWallet] : [firstWallet, secondWallet] };
+      } else if (path.includes("/api/wallets/portfolio")) {
+        portfolioLoads += 1;
+        body = {
+          network: "devnet",
+          scannedAt: "2026-09-30T12:30:00.000Z",
+          managedWalletCount: 1,
+          scannedWalletCount: 1,
+          failedWallets: [],
+          assets: [{
+            kind: "native",
+            name: "Solana",
+            symbol: "SOL",
+            decimals: 9,
+            totalBaseUnits: "1250000000",
+            wallets: [{ address: firstWallet.address, balanceBaseUnits: "1250000000" }],
+          }],
+        };
+      } else if (path.endsWith("/api/address-lookup-tables")) {
+        body = { addressLookupTables: [] };
+      } else {
+        body = { transfer: [{ id: "native-sol-transfer", label: "Native SOL transfer" }], delivery: [] };
+      }
+      return { ok: true, json: async () => body } as Response;
+    });
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Keygen 1" });
+    fireEvent.click(screen.getByRole("button", { name: "Wallets" }));
+
+    expect(screen.getByRole("button", { name: "Scan all wallets" })).toBeEnabled();
+    expect(portfolioLoads).toBe(0);
+    fireEvent.click(screen.getByRole("button", { name: "Scan all wallets" }));
+
+    expect(await screen.findByText("1.25", { selector: ".portfolio-asset-total strong" })).toBeInTheDocument();
+    expect(portfolioLoads).toBe(1);
+    fireEvent.click(screen.getByText("Solana").closest("summary")!);
+    expect(screen.getByText(firstWallet.address, { selector: "code" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Workbench" }));
+    fireEvent.click(screen.getByRole("button", { name: "Wallets" }));
+    expect(screen.getByText("1.25", { selector: ".portfolio-asset-total strong" })).toBeInTheDocument();
+    expect(portfolioLoads).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "mainnet" }));
+    expect(screen.getByRole("button", { name: "Scan all wallets" })).toBeInTheDocument();
+    expect(screen.queryByText("1.25", { selector: ".portfolio-asset-total strong" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "devnet" }));
+    expect(screen.getByText("1.25", { selector: ".portfolio-asset-total strong" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Keygen 1" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh files" }));
+    await screen.findByText("2 managed");
+    fireEvent.click(screen.getByRole("button", { name: "Wallets" }));
+    expect(screen.getByText("Wallet list changed")).toBeInTheDocument();
+    expect(screen.getByText("1.25", { selector: ".portfolio-asset-total strong" })).toBeInTheDocument();
+  });
 });

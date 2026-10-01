@@ -1,0 +1,1 @@
+export { WalletsTab } from "./WalletsTab";

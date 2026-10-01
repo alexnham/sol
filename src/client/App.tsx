@@ -11,6 +11,7 @@ import type {
   LookupTableSharePlanInput,
   ConsolidationPlan,
 } from "../shared/contracts";
+import type { WalletPortfolioReport } from "../shared/wallet-portfolio";
 import { CONSOLIDATION_SIGNATURE_LIMITS } from "../shared/contracts";
 import { getTransferTotal, lamportsToSol, parseTransferPlanInput, PlanValidationError } from "../shared/schema";
 import {
@@ -24,6 +25,7 @@ import {
   fetchPlugins,
   fetchAddressLookupTables,
   fetchVaultKeys,
+  fetchWalletPortfolio,
   createAddressLookupTable,
   generateVaultKeys,
   prepareTransfer,
@@ -39,6 +41,7 @@ import { AirshipTab } from "./features/airship";
 import { GuideTab } from "./features/guide";
 import { LiquidityTab } from "./features/liquidity";
 import { MintingTab } from "./features/minting";
+import { WalletsTab } from "./features/wallets";
 
 const SHARE_SAMPLE = `{
   "type": "share",
@@ -137,7 +140,8 @@ const PRESETS: Array<{
 
 type Stage = "idle" | "preparing" | "ready" | "signing" | "submitting" | "confirmed" | "failed";
 type SignerUiStatus = "waiting" | "signing" | "signed" | "failed";
-type AppTab = "workbench" | "keygen" | "minting" | "airship" | "liquidity" | "guide";
+type AppTab = "workbench" | "keygen" | "wallets" | "minting" | "airship" | "liquidity" | "guide";
+type PortfolioCache = Partial<Record<Network, { fingerprint: string; report: WalletPortfolioReport }>>;
 
 const FALLBACK_SOURCE = "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE";
 const FALLBACK_DESTINATION = "D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ";
@@ -168,6 +172,9 @@ export default function App() {
   const [editorExpandedOverride, setEditorExpandedOverride] = useState<boolean | null>(null);
   const [copiedWorkbenchTransactions, setCopiedWorkbenchTransactions] = useState(false);
   const [airdropRecipients, setAirdropRecipients] = useState<string[]>([]);
+  const [portfolioCache, setPortfolioCache] = useState<PortfolioCache>({});
+  const [portfolioLoading, setPortfolioLoading] = useState<Partial<Record<Network, boolean>>>({});
+  const [portfolioErrors, setPortfolioErrors] = useState<Partial<Record<Network, string | null>>>({});
 
   const parsed = useMemo(() => parseEditor(json), [json]);
   const preparation = preparations[0] ?? null;
@@ -182,6 +189,11 @@ export default function App() {
   const consolidationTransactionEstimate = plan?.type === "consolidation"
     ? estimateConsolidationTransactions(plan, consolidationSignatureLimit)
     : 0;
+  const walletFingerprint = useMemo(
+    () => vaultKeys.map((keypair) => keypair.address).sort().join("|"),
+    [vaultKeys],
+  );
+  const portfolioEntry = portfolioCache[network] ?? null;
 
   useEffect(() => {
     let active = true;
@@ -229,6 +241,23 @@ export default function App() {
       setVaultError(reason instanceof Error ? reason.message : "Key generation failed");
     } finally {
       setVaultBusy(false);
+    }
+  }
+
+  async function scanWalletPortfolio() {
+    const fingerprint = walletFingerprint;
+    setPortfolioLoading((current) => ({ ...current, [network]: true }));
+    setPortfolioErrors((current) => ({ ...current, [network]: null }));
+    try {
+      const report = await fetchWalletPortfolio(network);
+      setPortfolioCache((current) => ({ ...current, [network]: { fingerprint, report } }));
+    } catch (reason) {
+      setPortfolioErrors((current) => ({
+        ...current,
+        [network]: reason instanceof Error ? reason.message : "Could not scan managed wallets",
+      }));
+    } finally {
+      setPortfolioLoading((current) => ({ ...current, [network]: false }));
     }
   }
 
@@ -466,15 +495,16 @@ export default function App() {
           <span className="mark" aria-hidden="true"><i /><i /><i /></span>
           <div>
             <h1>Solana workbench</h1>
-            <p>{activeTab === "guide" ? "Practical recipes for tokens, keys, and transactions." : activeTab === "minting" ? "Create and manage SPL Token mints." : activeTab === "airship" ? "Distribute tokens with AirShip or a standard SPL airdrop." : activeTab === "liquidity" ? "Open markets and manage custom AMM liquidity." : transactionVersion === 0
+            <p>{activeTab === "guide" ? "Practical recipes for tokens, keys, and transactions." : activeTab === "wallets" ? "Aggregate managed-wallet balances by asset." : activeTab === "minting" ? "Create and manage SPL Token mints." : activeTab === "airship" ? "Distribute tokens with AirShip or a standard SPL airdrop." : activeTab === "liquidity" ? "Open markets and manage custom AMM liquidity." : transactionVersion === 0
               ? "ALT-compressed distributor transactions."
               : "Larger v1 transactions with direct System transfers."}</p>
           </div>
         </div>
         <div className="topbar-controls">
           <nav className="app-tabs" aria-label="Workbench sections">
-            <button type="button" className={activeTab === "workbench" ? "active" : ""} onClick={() => setActiveTab("workbench")}>Workbench</button>
+            <button type="button" className={activeTab === "wallets" ? "active" : ""} onClick={() => setActiveTab("wallets")}>Wallets</button>
             <button type="button" className={activeTab === "keygen" ? "active" : ""} onClick={() => setActiveTab("keygen")}>Keygen <span>{vaultKeys.length}</span></button>
+            <button type="button" className={activeTab === "workbench" ? "active" : ""} onClick={() => setActiveTab("workbench")}>Workbench</button>
             <button type="button" className={activeTab === "minting" ? "active" : ""} onClick={() => setActiveTab("minting")}>Minting</button>
             <button type="button" className={activeTab === "airship" ? "active" : ""} onClick={() => setActiveTab("airship")}>Airdrop</button>
             <button type="button" className={activeTab === "liquidity" ? "active" : ""} onClick={() => setActiveTab("liquidity")}>Liquidity</button>
@@ -786,6 +816,16 @@ export default function App() {
           onUse={useVaultKeys}
           onUseForAirdrop={useVaultKeysForAirdrop}
           onUseLookupTable={useLookupTable}
+        />
+      ) : activeTab === "wallets" ? (
+        <WalletsTab
+          network={network}
+          managedWalletCount={vaultKeys.length}
+          report={portfolioEntry?.report ?? null}
+          stale={Boolean(portfolioEntry && portfolioEntry.fingerprint !== walletFingerprint)}
+          loading={Boolean(portfolioLoading[network])}
+          error={portfolioErrors[network] ?? null}
+          onScan={() => void scanWalletPortfolio()}
         />
       ) : activeTab === "minting" ? (
         <MintingTab

@@ -13,6 +13,7 @@ import {
   signWithVaultKey,
 } from "../../infrastructure/key-vault";
 import type { StoredPreparation } from "../../features/transfers";
+import { parseWalletPortfolioNetwork, scanManagedWalletPortfolio } from "../../features/wallets/portfolio";
 
 const altCreationLocks = new Set<string>();
 
@@ -20,6 +21,18 @@ export function registerWalletRoutes(
   app: Application,
   preparations: ReadonlyMap<string, StoredPreparation>,
 ): void {
+  app.get("/api/wallets/portfolio", async (request, response, next) => {
+    try {
+      const network = parseWalletPortfolioNetwork(request.query.network);
+      const keys = await listVaultKeys();
+      response.json(await scanManagedWalletPortfolio(
+        getRpcUrl(network),
+        network,
+        keys.map((key) => key.address),
+      ));
+    } catch (error) { next(error); }
+  });
+
   app.get("/api/keypairs", async (_request, response, next) => {
     try { response.json({ keypairs: await listVaultKeys() }); }
     catch (error) { next(error); }
